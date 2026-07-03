@@ -478,6 +478,20 @@ async def generate_coach_briefing() -> dict:
         return {"status": "disabled"}
     ctx = _coach_context(conn)
     conn.close()
+    # Pull the dashboard's day-by-day simulation results (lazy import — main
+    # imports sync at startup, so importing main here at job time is safe).
+    # These are the month-boundary-aware numbers: the simulation walks dates,
+    # not calendar months, so a paycheck landing two days before the 1st is
+    # automatically reserved for the next month's first bills.
+    try:
+        from main import dashboard
+        d = await dashboard()
+        ctx["safe_to_transfer_today"] = d.get("suggested_transfer")
+        ctx["projected_low_point_minus_buffer"] = d.get("safe_today")
+        ctx["overdraft_warnings_count"] = len(d.get("overdraft_warnings") or [])
+        ctx["next_transfer_date"] = d.get("next_transfer_date")
+    except Exception:
+        pass
 
     prompt = f"""You are the household's finance coach. Below are today's precomputed numbers from their finance app. All math is already done — never recalculate, estimate, or invent any number; only use figures exactly as given.
 
@@ -494,6 +508,7 @@ Field meanings (be precise about these):
 - next_unpaid_bill: the next bill that still needs to be paid, however far out. Use it to say when the next obligation actually arrives.
 - discretionary_spent_month_to_date: spent so far THIS month.
 - discretionary_same_period_last_month: spent over the SAME NUMBER OF DAYS at the start of LAST MONTH (a month-over-month comparison — never say "last year").
+- safe_to_transfer_today: from a day-by-day simulation that already reserves money for every upcoming bill in the next 60 days, INCLUDING bills early next month. When advising what is free to move, spend, or send at debt, use THIS number and only this number. Never reason from "income minus bills for the month" — a paycheck landing near month-end usually funds the next month's first bills, and calling it extra money is a mistake this household has explicitly asked you not to make.
 
 Today's numbers:
 {json.dumps(ctx, indent=1)}"""

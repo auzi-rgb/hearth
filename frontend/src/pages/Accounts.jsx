@@ -139,6 +139,15 @@ function IncomeCard({ data }) {
   const avg = data.average_monthly_income
   const isHighMonth = data.members.some(m => m.expected_count > m.usual_count)
 
+  // An "extra" check landing in the last few days of the month mostly funds
+  // the next month's first-week bills — flag it so the monthly total isn't
+  // mistaken for spendable surplus (the calendar-month framing hides this;
+  // the Dashboard's day-by-day safe-to-transfer simulation does not).
+  const [yr, mo] = data.month.split('-').map(Number)
+  const monthEndDay = new Date(yr, mo, 0).getDate()
+  const lastCheck = data.members.flatMap(m => m.projected.map(p => p.date)).sort().slice(-1)[0]
+  const lateCheck = lastCheck && parseInt(lastCheck.slice(8, 10), 10) >= monthEndDay - 4
+
   return (
     <div className="apple-card" style={{ padding: '20px 24px', marginBottom: 20 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 10, marginBottom: 4 }}>
@@ -185,6 +194,14 @@ function IncomeCard({ data }) {
           </div>
         )
       })}
+      {isHighMonth && lateCheck && (
+        <div style={{ marginTop: 10, padding: '8px 12px', background: 'var(--bg-subtle)', borderRadius: 8,
+          fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+          The {fmtDay(lastCheck)} check lands right before the month rolls over — it mostly funds next
+          month's first-week bills. The Dashboard's safe-to-transfer number already accounts for that;
+          this monthly total doesn't.
+        </div>
+      )}
     </div>
   )
 }
