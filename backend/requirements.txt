@@ -1,5 +1,13 @@
-fastapi
-uvicorn
-httpx
-python-multipart
-apscheduler
+# Pinned to the exact versions installed on the production host (pip freeze, 2026-07-03).
+# Install with: python3 -m pip install -r requirements.txt
+fastapi==0.136.3
+uvicorn==0.48.0
+httpx==0.28.1
+python-multipart==0.0.29
+APScheduler==3.11.2
+python-jose==3.5.0
+passlib==1.7.4
+# passlib 1.7.4 is incompatible with bcrypt >= 4.1 (removed __about__ attribute).
+# Keep bcrypt below 4.1 unless passlib is replaced.
+bcrypt==3.2.2
+slowapi==0.1.9

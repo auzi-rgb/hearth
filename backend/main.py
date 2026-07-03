@@ -21,7 +21,7 @@ import logging
 import httpx
 from datetime import datetime, date, timedelta
 from contextlib import asynccontextmanager
-from sync import auto_category
+from sync import auto_category, get_household, DEFAULT_HOUSEHOLD
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "finance.db")
 logger = logging.getLogger("hearth")
@@ -214,6 +214,19 @@ def init_db():
         conn.commit()
     except Exception:
         pass
+    # These two columns were originally added by hand directly on the production
+    # database and never made it into code — a fresh database crashed on any
+    # endpoint that read them. Now migrated like every other column.
+    try:
+        conn.execute("ALTER TABLE accounts ADD COLUMN nickname TEXT")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE bills ADD COLUMN display_name TEXT")
+        conn.commit()
+    except Exception:
+        pass
     conn.execute("UPDATE bills SET frequency = 'monthly' WHERE frequency IS NULL")
     conn.commit()
     try:
@@ -295,6 +308,15 @@ def _bootstrap_auth():
         # Print once to systemd journal
         print(f"[home-finance] TEMPORARY ADMIN PASSWORD: {temp_pw}", flush=True)
         logger.warning("Default admin user created — temporary password printed above. Change it after first login.")
+
+    # Seed household config so it's editable in Settings from day one. The defaults
+    # reproduce the behavior from when these values were hardcoded in sync.py.
+    if not conn.execute("SELECT value FROM settings WHERE key='household_members'").fetchone():
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('household_members', ?)",
+            (json.dumps(DEFAULT_HOUSEHOLD),)
+        )
+        conn.commit()
 
     conn.close()
 
@@ -608,7 +630,8 @@ def detect_next_payday(conn, person: str) -> dict:
     # than as the new schedule) keeps projections on the real recurring pattern.
     today = date.today()
     dow = int(get_setting(conn, f"payday_dow_{person}", "3"))  # default Thursday
-    default_freq = "biweekly" if person == "austin" else "weekly"
+    member = next((m for m in get_household(conn) if m["key"] == person), None)
+    default_freq = (member or {}).get("default_frequency") or "biweekly"
     frequency = get_setting(conn, f"payday_frequency_{person}", default_freq)
     interval_weeks = 2 if frequency == "biweekly" else 1
     interval = timedelta(weeks=interval_weeks)
@@ -675,6 +698,27 @@ def get_account_balance(conn, account_id: int) -> float:
 def get_setting(conn, key: str, default=None):
     row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
     return row["value"] if row else default
+
+def find_role_account(conn, role: str, name_hint: str):
+    """Resolve which account plays a special role (bills, food). An explicit
+    setting ({role}_account_id, set on the Settings page) always wins; the legacy
+    name-substring match is only a fallback so existing installs keep working
+    until the role is picked explicitly. Renaming an account can silently break
+    the fallback — that's exactly why the setting exists."""
+    val = get_setting(conn, f"{role}_account_id")
+    if val:
+        try:
+            row = conn.execute(
+                "SELECT * FROM accounts WHERE id=? AND is_active=1", (int(val),)
+            ).fetchone()
+            if row:
+                return row
+        except (ValueError, TypeError):
+            pass
+    return conn.execute(
+        "SELECT * FROM accounts WHERE is_active=1 AND LOWER(name) LIKE ? LIMIT 1",
+        (f"%{name_hint}%",)
+    ).fetchone()
 
 def set_setting(conn, key: str, value: str):
     conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
@@ -1046,11 +1090,11 @@ async def dashboard():
             "is_weekly": False,
         })
     upcoming_bills.sort(key=lambda x: x["days_until"])
-    austin_pay = detect_next_payday(conn, "austin")
-    wife_pay = detect_next_payday(conn, "anushka")
-    next_pay = austin_pay if austin_pay["next_date"] <= wife_pay["next_date"] else wife_pay
+    members = get_household(conn)
+    pay_by_member = {m["key"]: detect_next_payday(conn, m["key"]) for m in members}
+    next_pay = min(pay_by_member.values(), key=lambda p: p["next_date"])
     next_pay_date = date.fromisoformat(next_pay["next_date"])
-    bills_account = next((a for a in accounts if "bills" in a["name"].lower()), None)
+    bills_account = find_role_account(conn, "bills", "bills")
     if bills_account:
         bills_balance = get_account_balance(conn, bills_account["id"])
     else:
@@ -1086,7 +1130,7 @@ async def dashboard():
     )
     # Projected income remaining this month
     projected_income_month = 0.0
-    for person, pay_info in [("austin", austin_pay), ("anushka", wife_pay)]:
+    for person, pay_info in pay_by_member.items():
         if not pay_info.get("next_date") or not pay_info.get("expected_amount"):
             continue
         d = date.fromisoformat(pay_info["next_date"])
@@ -1115,7 +1159,8 @@ async def dashboard():
         due = date.fromisoformat(b["due_date"])
         if due >= today and not b.get("paid"):
             _sim_events.append((due, -b["amount"], b["name"], "bill"))
-    for _p, pay_info in [("austin", austin_pay), ("anushka", wife_pay)]:
+    member_labels = {m["key"]: m.get("label") or m["key"].capitalize() for m in members}
+    for _p, pay_info in pay_by_member.items():
         if not pay_info.get("next_date") or not pay_info.get("expected_amount"):
             continue
         _d = date.fromisoformat(pay_info["next_date"])
@@ -1123,7 +1168,7 @@ async def dashboard():
         freq_weeks = pay_info.get("interval_weeks", 2)
         while _d <= today + timedelta(days=60):
             if _d >= today:
-                _sim_events.append((_d, _amt, f"{_p.capitalize()} paycheck", "income"))
+                _sim_events.append((_d, _amt, f"{member_labels[_p]} paycheck", "income"))
             _d += timedelta(weeks=freq_weeks)
     _sim_events.sort(key=lambda x: x[0])
     _running = bills_balance
@@ -1171,7 +1216,7 @@ async def dashboard():
         monthly_history = list(reversed([dict(r) for r in mh_rows]))
 
     days_until_paycheck = (next_pay_date - today).days
-    food_account = next((a for a in accounts if "food" in a["name"].lower()), None)
+    food_account = find_role_account(conn, "food", "food")
     food_balance = get_account_balance(conn, food_account["id"]) if food_account else 0.0
 
     month_start = today.replace(day=1).isoformat()
@@ -1234,7 +1279,7 @@ async def dashboard():
         "low_balance_warning": low_balance_warning,
         "low_balance_threshold": threshold,
         "upcoming_bills": upcoming_bills[:10],
-        "next_income": {"austin": austin_pay, "anushka": wife_pay, "soonest": next_pay},
+        "next_income": {**pay_by_member, "soonest": next_pay},
         "paycheck_variances": [dict(r) for r in variances],
         "monthly_history": monthly_history,
         "encumbered_30d": 0,
@@ -1324,7 +1369,8 @@ async def calendar_data(month: str = None):
             seen_pay_dates.add(d)
     today_cal = date.today()
     if date(year, mon, 1) >= today_cal.replace(day=1):
-        for person in ["austin", "anushka"]:
+        for m in get_household(conn):
+            person = m["key"]
             info = detect_next_payday(conn, person)
             if not info.get("next_date"):
                 continue
@@ -1344,9 +1390,7 @@ async def calendar_data(month: str = None):
             "description": t["description"], "category": t["category"],
             "account": t["account_name"], "is_pending": bool(t["is_pending"]),
         })
-    bills_acct = conn.execute(
-        "SELECT id FROM accounts WHERE LOWER(name) LIKE '%bills%' LIMIT 1"
-    ).fetchone()
+    bills_acct = find_role_account(conn, "bills", "bills")
     bills_bal     = get_account_balance(conn, bills_acct["id"]) if bills_acct else 0.0
     low_threshold = float(get_setting(conn, "low_balance_threshold", "500"))
     conn.close()
@@ -2173,7 +2217,8 @@ async def bill_history():
 async def upcoming_paychecks():
     conn = get_db()
     result = []
-    for person in ["austin", "anushka"]:
+    for m in get_household(conn):
+        person = m["key"]
         info = detect_next_payday(conn, person)
         next_d = date.fromisoformat(info["next_date"])
         interval = timedelta(weeks=info.get("interval_weeks", 2))
@@ -2526,7 +2571,9 @@ async def ai_context():
         get_account_balance(conn, a["id"]) for a in accounts
         if a["type"] in ("checking", "savings")
     )
-    next_pay = detect_next_payday(conn, "austin")
+    # Soonest payday across the whole household, not any one hardcoded member
+    _pays = [detect_next_payday(conn, m["key"]) for m in get_household(conn)]
+    next_pay = min(_pays, key=lambda p: p["next_date"]) if _pays else {"next_date": None}
     next_pay_date = date.fromisoformat(next_pay["next_date"]) if next_pay["next_date"] else None
     bills_before_pay = sum(
         float(b["expected_amount"]) for b in bills

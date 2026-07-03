@@ -45,12 +45,20 @@ export default function Settings({ active }) {
   const [threshMsg, setThreshMsg] = useState(null)
   const [threshSaving, setThreshSaving] = useState(false)
 
-  const [payday, setPayday] = useState({
-    austin:  { dow: '3', frequency: 'biweekly' },
-    anushka: { dow: '3', frequency: 'weekly' },
-  })
-  const [paydayMsg, setPaydayMsg] = useState({ austin: null, anushka: null })
-  const [paydaySaving, setPaydaySaving] = useState({ austin: false, anushka: false })
+  const [payday, setPayday] = useState({})
+  const [paydayMsg, setPaydayMsg] = useState({})
+  const [paydaySaving, setPaydaySaving] = useState({})
+
+  // Household members drive paycheck detection and attribution. Kept in settings
+  // (household_members) so names/employers/pay ranges are data, not code.
+  const [household, setHousehold] = useState([])
+  const [householdMsg, setHouseholdMsg] = useState(null)
+  const [householdSaving, setHouseholdSaving] = useState(false)
+  const [newMemberName, setNewMemberName] = useState('')
+
+  const [roles, setRoles] = useState({ bills: '', food: '' })
+  const [rolesMsg, setRolesMsg] = useState(null)
+  const [rolesSaving, setRolesSaving] = useState(false)
 
   const [safeBuffer, setSafeBuffer] = useState('')
   const [bufferMsg, setBufferMsg] = useState(null)
@@ -137,10 +145,23 @@ const [simplefinToken, setSimplefinToken] = useState('')
       .then(d => {
         if (d.low_balance_threshold) setThreshold(d.low_balance_threshold)
         if (d.safe_spend_buffer) setSafeBuffer(d.safe_spend_buffer)
-        setPayday(p => ({
-          austin:  { dow: d.payday_dow_austin  ?? p.austin.dow,  frequency: d.payday_frequency_austin  ?? p.austin.frequency },
-          anushka: { dow: d.payday_dow_anushka ?? p.anushka.dow, frequency: d.payday_frequency_anushka ?? p.anushka.frequency },
-        }))
+        let members = []
+        try { members = JSON.parse(d.household_members) || [] } catch { members = [] }
+        if (!Array.isArray(members)) members = []
+        // _kwText holds the raw comma-separated keyword text while editing;
+        // it's stripped back to a clean array on save.
+        setHousehold(members.map(m => ({ ...m, _kwText: (m.payroll_keywords || []).join(', ') })))
+        setPayday(() => {
+          const p = {}
+          members.forEach(m => {
+            p[m.key] = {
+              dow: d[`payday_dow_${m.key}`] ?? '3',
+              frequency: d[`payday_frequency_${m.key}`] ?? (m.default_frequency || 'biweekly'),
+            }
+          })
+          return p
+        })
+        setRoles({ bills: d.bills_account_id || '', food: d.food_account_id || '' })
         if (d.ai_default_model) setAiModel(d.ai_default_model)
         if (d.ai_system_prompt) setAiSystemPrompt(d.ai_system_prompt)
         if (d.ai_temperature) setAiTemperature(parseFloat(d.ai_temperature))
@@ -218,6 +239,66 @@ const [simplefinToken, setSimplefinToken] = useState('')
       setPaydayMsg(p => ({ ...p, [person]: 'Saved' }))
     } catch (e) { setPaydayMsg(p => ({ ...p, [person]: '!' + e.message })) }
     finally { setPaydaySaving(p => ({ ...p, [person]: false })) }
+  }
+
+  async function saveHousehold() {
+    setHouseholdSaving(true); setHouseholdMsg(null)
+    try {
+      const cleaned = household.map(m => {
+        const { _kwText, ...rest } = m
+        return {
+          ...rest,
+          label: (m.label || '').trim(),
+          payroll_keywords: (_kwText ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
+          amount_min: m.amount_min === '' || m.amount_min == null ? null : parseFloat(m.amount_min),
+          amount_max: m.amount_max === '' || m.amount_max == null ? null : parseFloat(m.amount_max),
+        }
+      })
+      if (cleaned.length === 0) throw new Error('At least one household member is required')
+      if (cleaned.some(m => !m.label)) throw new Error('Every member needs a name')
+      const r = await fetch(`${API}/settings/household_members`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: JSON.stringify(cleaned) }),
+      })
+      if (!r.ok) throw new Error('Save failed')
+      setHouseholdMsg('Saved — applies to the next sync')
+    } catch (e) { setHouseholdMsg('!' + e.message) }
+    finally { setHouseholdSaving(false) }
+  }
+
+  function addMember() {
+    const label = newMemberName.trim()
+    if (!label) return
+    const key = label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+    if (!key) { setHouseholdMsg('!Name must contain letters or numbers'); return }
+    if (household.some(m => m.key === key)) { setHouseholdMsg('!That name is already in use'); return }
+    setHousehold(h => [...h, {
+      key, label, payroll_keywords: [], amount_min: null, amount_max: null,
+      default_frequency: 'biweekly', _kwText: '',
+    }])
+    setPayday(p => ({ ...p, [key]: { dow: '3', frequency: 'biweekly' } }))
+    setNewMemberName('')
+    setHouseholdMsg(null)
+  }
+
+  function updateMember(key, patch) {
+    setHousehold(h => h.map(m => m.key === key ? { ...m, ...patch } : m))
+  }
+
+  function removeMember(key) {
+    setHousehold(h => h.filter(m => m.key !== key))
+  }
+
+  async function saveRoles() {
+    setRolesSaving(true); setRolesMsg(null)
+    try {
+      await Promise.all([
+        fetch(`${API}/settings/bills_account_id`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value: roles.bills }) }),
+        fetch(`${API}/settings/food_account_id`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value: roles.food }) }),
+      ])
+      setRolesMsg('Saved')
+    } catch (e) { setRolesMsg('!' + e.message) }
+    finally { setRolesSaving(false) }
   }
 
 async function connectSimplefin(e) {
@@ -760,41 +841,119 @@ async function connectSimplefin(e) {
         </form>
       </Section>
 
+      {/* Household members — drives paycheck detection and attribution */}
+      <Section title="Household">
+        <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 20 }}>
+          Who earns income in this household. The sync uses the payroll keywords (matched against bank
+          transaction descriptions) and the typical pay range to figure out whose paycheck a deposit is.
+        </div>
+        {household.map((m, i) => (
+          <div key={m.key} style={{ marginBottom: 16, paddingBottom: 16, borderBottom: i < household.length - 1 ? '1px solid var(--border)' : 'none' }}>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: 10 }}>
+              <Field label="Name" hint={null}>
+                <input className="apple-input" value={m.label || ''} onChange={e => updateMember(m.key, { label: e.target.value })} style={{ width: 140 }} />
+              </Field>
+              <Field label="Typical Pay Min" hint={null}>
+                <input className="apple-input" type="number" min="0" step="50" placeholder="—"
+                  value={m.amount_min ?? ''} onChange={e => updateMember(m.key, { amount_min: e.target.value })} style={{ width: 120 }} />
+              </Field>
+              <Field label="Typical Pay Max" hint={null}>
+                <input className="apple-input" type="number" min="0" step="50" placeholder="—"
+                  value={m.amount_max ?? ''} onChange={e => updateMember(m.key, { amount_max: e.target.value })} style={{ width: 120 }} />
+              </Field>
+              {household.length > 1 && (
+                <button className="apple-btn-secondary" onClick={() => removeMember(m.key)}
+                  style={{ fontSize: 12, color: 'var(--red)', flexShrink: 0 }}>
+                  Remove
+                </button>
+              )}
+            </div>
+            <Field label="Payroll Keywords" hint="Comma-separated text found in this person's paycheck deposits (e.g. employer name as it appears in the bank description).">
+              <input className="apple-input" value={m._kwText ?? ''} onChange={e => updateMember(m.key, { _kwText: e.target.value })} />
+            </Field>
+          </div>
+        ))}
+        <div style={{ display: 'flex', gap: 10, marginTop: 4, marginBottom: 12 }}>
+          <input className="apple-input" placeholder="Add member by name…" value={newMemberName}
+            onChange={e => setNewMemberName(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') addMember() }} style={{ width: 220 }} />
+          <button className="apple-btn-secondary" onClick={addMember} disabled={!newMemberName.trim()} style={{ flexShrink: 0 }}>
+            Add Member
+          </button>
+        </div>
+        <button className="apple-btn-primary" onClick={saveHousehold} disabled={householdSaving}>
+          {householdSaving ? 'Saving…' : 'Save Household'}
+        </button>
+        <StatusMsg msg={householdMsg} />
+      </Section>
+
+      {/* Account roles — which account is the Bills / Food account */}
+      <Section title="Account Roles">
+        <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 20 }}>
+          The Dashboard treats one account as the Bills account (where bills get paid from) and one as the
+          Food account (day-to-day spending). Pick them explicitly here — "Auto" falls back to matching
+          "bills" or "food" in the account name, which breaks silently if an account is renamed.
+        </div>
+        <div style={{ display: 'flex', gap: 16, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+          <Field label="Bills Account" hint={null}>
+            <select className="apple-select" value={roles.bills} onChange={e => setRoles(r => ({ ...r, bills: e.target.value }))}>
+              <option value="">Auto (match by name)</option>
+              {csvAccounts.map(a => <option key={a.id} value={a.id}>{a.display_name || a.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Food Account" hint={null}>
+            <select className="apple-select" value={roles.food} onChange={e => setRoles(r => ({ ...r, food: e.target.value }))}>
+              <option value="">Auto (match by name)</option>
+              {csvAccounts.map(a => <option key={a.id} value={a.id}>{a.display_name || a.name}</option>)}
+            </select>
+          </Field>
+          <button className="apple-btn-primary" onClick={saveRoles} disabled={rolesSaving} style={{ flexShrink: 0 }}>
+            {rolesSaving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+        <StatusMsg msg={rolesMsg} />
+      </Section>
+
       <Section title="Paycheck Schedule">
         <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 20 }}>
           When each paycheck is expected — used to project upcoming income and check it lands in time to cover bills.
           A paycheck landing a day early or late (e.g. for a bank holiday) doesn't shift this schedule; it's just treated as that cycle's payment.
         </div>
-        {['austin', 'anushka'].map(person => (
-          <div key={person} style={{ marginBottom: person === 'austin' ? 20 : 0, paddingBottom: person === 'austin' ? 20 : 0, borderBottom: person === 'austin' ? '1px solid var(--border)' : 'none' }}>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, textTransform: 'capitalize' }}>{person}</div>
-            <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-              <Field label="Day of Week" hint={null}>
-                <select className="apple-select" value={payday[person].dow}
-                  onChange={e => setPayday(p => ({ ...p, [person]: { ...p[person], dow: e.target.value } }))}>
-                  <option value="0">Monday</option>
-                  <option value="1">Tuesday</option>
-                  <option value="2">Wednesday</option>
-                  <option value="3">Thursday</option>
-                  <option value="4">Friday</option>
-                  <option value="5">Saturday</option>
-                  <option value="6">Sunday</option>
-                </select>
-              </Field>
-              <Field label="Frequency" hint={null}>
-                <select className="apple-select" value={payday[person].frequency}
-                  onChange={e => setPayday(p => ({ ...p, [person]: { ...p[person], frequency: e.target.value } }))}>
-                  <option value="weekly">Weekly</option>
-                  <option value="biweekly">Every 2 weeks</option>
-                </select>
-              </Field>
-              <button className="apple-btn-primary" onClick={() => savePayday(person)} disabled={paydaySaving[person]} style={{ flexShrink: 0 }}>
-                {paydaySaving[person] ? 'Saving…' : 'Save'}
-              </button>
+        {household.map((m, i) => {
+          const person = m.key
+          const pd = payday[person] || { dow: '3', frequency: m.default_frequency || 'biweekly' }
+          const isLast = i === household.length - 1
+          return (
+            <div key={person} style={{ marginBottom: isLast ? 0 : 20, paddingBottom: isLast ? 0 : 20, borderBottom: isLast ? 'none' : '1px solid var(--border)' }}>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>{m.label || person}</div>
+              <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+                <Field label="Day of Week" hint={null}>
+                  <select className="apple-select" value={pd.dow}
+                    onChange={e => setPayday(p => ({ ...p, [person]: { ...pd, dow: e.target.value } }))}>
+                    <option value="0">Monday</option>
+                    <option value="1">Tuesday</option>
+                    <option value="2">Wednesday</option>
+                    <option value="3">Thursday</option>
+                    <option value="4">Friday</option>
+                    <option value="5">Saturday</option>
+                    <option value="6">Sunday</option>
+                  </select>
+                </Field>
+                <Field label="Frequency" hint={null}>
+                  <select className="apple-select" value={pd.frequency}
+                    onChange={e => setPayday(p => ({ ...p, [person]: { ...pd, frequency: e.target.value } }))}>
+                    <option value="weekly">Weekly</option>
+                    <option value="biweekly">Every 2 weeks</option>
+                  </select>
+                </Field>
+                <button className="apple-btn-primary" onClick={() => savePayday(person)} disabled={paydaySaving[person]} style={{ flexShrink: 0 }}>
+                  {paydaySaving[person] ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+              <StatusMsg msg={paydayMsg[person]} />
             </div>
-            <StatusMsg msg={paydayMsg[person]} />
-          </div>
-        ))}
+          )
+        })}
       </Section>
 
       {/* CSV Import */}

@@ -1,8 +1,12 @@
 # HEARTH — Project Context
-Last updated: **2026-06-14** (Session 5)
+Last updated: **2026-07-03** (Session 6 — QC review, audited line-by-line against the code)
 
 Self-hosted home finance app. FastAPI backend + SQLite + React SPA.
 Run at `~/home-finance/`. Web UI served at `/hearth` via nginx reverse proxy.
+
+> This file was rewritten in Session 6 after it had drifted badly from the code
+> (it documented endpoints that didn't exist and a bcrypt pin that wasn't real).
+> **If you change the code, change this file in the same session.**
 
 ---
 
@@ -13,7 +17,7 @@ Run at `~/home-finance/`. Web UI served at `/hearth` via nginx reverse proxy.
 | Backend (FastAPI) | 8100 | `sudo systemctl restart hearth` |
 | Frontend (nginx) | — | `sudo cp -r dist/. /var/www/hearth/` |
 
-**Backend entry:** `~/home-finance/backend/main.py` (~2430+ lines)
+**Backend entry:** `~/home-finance/backend/main.py`
 **Frontend entry:** `~/home-finance/frontend/src/App.jsx`
 
 Build + deploy frontend:
@@ -22,37 +26,53 @@ cd ~/home-finance/frontend && source ~/.nvm/nvm.sh && npm run build && sudo cp -
 ```
 
 > **IMPORTANT:** nginx serves Hearth from `/var/www/hearth/` — NOT `/var/www/finance/`.
-> The `finance/` directory exists but is not served by nginx. Always deploy to `hearth/`.
 
-Backend restart (after any `main.py` change):
+Backend restart (after any `main.py` / `sync.py` change):
 ```bash
 sudo systemctl restart hearth
 ```
+
+## Version control & backups (Session 6)
+
+- `~/home-finance` is a **git repository** (branch `main`). Commit after every working change.
+  `finance.db`, its backups, `dist/`, and `node_modules/` are gitignored — never force-add them.
+- **Nightly DB backup** at 3:30am (APScheduler job in `sync.py::backup_database`) to
+  `backend/backups/finance-YYYYMMDD-HHMMSS.db`, keeping the newest 14. Uses sqlite's online
+  backup API, safe while the app runs.
+- Not yet pushed to GitHub. If pushing: **private repo only**; the DB is gitignored but review
+  history before pushing anything.
 
 ---
 
 ## Tech Stack
 
-- **Backend:** Python 3, FastAPI, SQLite (WAL mode), `python-jose` (JWT), `slowapi` (rate limiting), SimpleFin bank sync
-- **Frontend:** React + Vite 8, no Tailwind, Apple-style CSS variables
-- **CSS classes:** `apple-card`, `apple-btn-primary`, `apple-btn-secondary`, `apple-input`, `apple-label`, `apple-select`
-- **CSS vars:** `--text-primary`, `--text-secondary`, `--text-tertiary`, `--accent`, `--accent-text`, `--red`, `--blue`, `--border`, `--bg-subtle`
-- **Auth:** JWT stored in localStorage; `/hearth/api/*` prefixed via nginx; frontend uses `const API = '/hearth/api'`
-- **bcrypt pinned to `4.0.1`** — do NOT touch `requirements.txt`
+- **Backend:** Python 3 (system python, no venv), FastAPI, SQLite (WAL mode), `python-jose` (JWT), `passlib`+`bcrypt` (password hashing), `slowapi` (rate limiting, currently only on `/api/ai/chat`), SimpleFin bank sync, APScheduler
+- **Frontend:** React + Vite, no Tailwind, Apple-style CSS variables
+- **CSS classes:** `apple-card`, `apple-btn-primary`, `apple-btn-secondary`, `apple-btn-danger`, `apple-input`, `apple-label`, `apple-select`
+- **Auth:** JWT (8h expiry) stored in localStorage; `/hearth/api/*` prefixed via nginx; frontend uses `const API = '/hearth/api'`; `api.js` monkey-patches `window.fetch` to inject the Bearer token and broadcast 401s
+- **Dependencies:** `backend/requirements.txt` is pinned to the versions actually installed (verified via pip freeze 2026-07-03). bcrypt is **3.2.2** (not 4.0.1 as this file previously claimed). passlib 1.7.4 breaks with bcrypt ≥ 4.1 — keep bcrypt below that.
+
+## AI Gateway
+
+Backend proxies AI calls to `https://10.0.0.24/gateway/api` (hardcoded `GATEWAY_URL` in main.py),
+self-signed cert, hence `verify=False` on those httpx calls. NOTE: `verify=False` is currently
+also applied to SimpleFin calls — known issue, see Known Issues.
 
 ---
 
 ## Database
 
-**Path:** `/home/austin/home-finance/backend/finance.db`
+**Path:** `/home/austin/home-finance/backend/finance.db` (gitignored)
+All migrations are idempotent `ALTER TABLE … ADD COLUMN` wrapped in `try/except` inside `init_db()`. Safe to re-run on restart. **Never ALTER the production DB by hand — add a migration.** (Session 6 fixed two hand-added columns, `accounts.nickname` and `bills.display_name`, that crashed fresh installs.)
 
 ### Key Tables
 
 **`bills`** — recurring/loan/debt payment obligations
 ```
-id, name, expected_amount, confidence (fixed|estimated),
-day_of_month, account_id, is_active,
-bill_type (TEXT legacy: required|optional),
+id, name, display_name, expected_amount, confidence (fixed|estimated),
+day_of_month, day_of_week, frequency (monthly|weekly),
+account_id, is_active,
+bill_type (TEXT legacy: required|optional — no longer used by Bills.jsx),
 payment_type (TEXT: Recurring|Loan|Debt),
 from_debt_budget (INTEGER 0/1),
 linked_loan_id (→ loans.id, for payment_type='Loan'),
@@ -60,247 +80,149 @@ linked_account_id (→ accounts.id, for payment_type='Debt'),
 notes
 ```
 
-**`bill_paid_months`** — per-month payment tracking
-```
-id, bill_id, month (YYYY-MM), paid_date
-```
+**`bill_paid_months`** — per-month payment tracking: `id, bill_id, month (YYYY-MM), paid_date`, UNIQUE(bill_id, month)
 
 **`accounts`** — bank/credit/loan accounts (synced via SimpleFin)
 ```
-id, name, type (checking|savings|credit|loan|personal_loan),
+id, name, nickname, type (checking|savings|credit|loan|personal_loan|investment),
 institution, simplefin_id, is_active,
-current_balance, balance_date, interest_rate, minimum_payment
+current_balance, balance_date, interest_rate, minimum_payment, created_at
 ```
 
 **`loans`** — manually-tracked loan amortization
 ```
-id, name, type (auto|personal_loan|mortgage|student|other),
-original_balance, current_balance, interest_rate,
+id, name, type, original_balance, current_balance, interest_rate,
 monthly_payment, payments_made, total_payments, start_date
 ```
 
-**`paychecks`** — income schedule
-```
-id, person, expected_amount, actual_amount,
-expected_date, actual_date, is_third_friday_period, notes
-```
+**`paychecks`** — income log: `id, person, expected_amount, actual_amount, expected_date, actual_date, is_third_friday_period, notes`. Rows with notes='auto-detected' come from sync. **No DELETE endpoint exists** — known issue.
 
-**`settings`** — key-value store
-```
-key, value
-```
-Keys in use: `jwt_secret`, `simplefin_access_url`, `ai_default_model`, `custom_categories`
-TMRS keys (written on first save via UI): `tmrs_contribution_balance`, `tmrs_monthly_benefit`, `tmrs_monthly_contribution`, `tmrs_years_of_service`
+**`transactions`** — ledger: `id, account_id, amount, description, category, transaction_date, posted_date, is_pending, is_transfer, category_confirmed, created_at`
 
-**`transactions`** — SimpleFin transaction ledger (10 cols)
-**`budgets`** — monthly budget limits by category (3 cols)
-**`merchant_rules`** — auto-categorization rules (4 cols)
-**`net_worth_history`** — monthly snapshots (5 cols)
+**`settings`** — key-value store. Keys in use:
+- `jwt_secret`, `simplefin_access_url` (both hidden from GET /api/settings and blocked from PUT)
+- `household_members` — **JSON list** of `{key, label, payroll_keywords[], amount_min, amount_max, default_frequency}`; seeded on startup from `sync.DEFAULT_HOUSEHOLD`; edited in Settings → Household. Drives paycheck detection/attribution. (Session 6 — replaced hardcoded names/employers/pay-ranges.)
+- `bills_account_id`, `food_account_id` — explicit account roles for the Dashboard (Session 6). Empty = legacy fallback of matching "bills"/"food" in the account name (`find_role_account` in main.py).
+- `payday_dow_{member_key}`, `payday_frequency_{member_key}`, `payday_anchor_{member_key}`
+- `low_balance_threshold`, `safe_spend_buffer`
+- `ai_default_model`, `ai_system_prompt`, `ai_temperature`, `ai_autorun`, `ai_autorun_prompt`
+- TMRS keys: `tmrs_account_balance`, `tmrs_your_contributions`, `tmrs_interest`, `tmrs_city_contributions`, `tmrs_monthly_deposit`, `tmrs_retirement_eligible_date`
+  (previous versions of this file listed different TMRS key names — these are the real ones)
 
-### DB Migration Pattern
-All migrations are idempotent `ALTER TABLE … ADD COLUMN` wrapped in `try/except OperationalError` inside `init_db()`. Safe to re-run on restart.
+Other tables: `budgets`, `merchant_rules`, `categories` (primary/secondary taxonomy), `net_worth_history`, `sync_log`, `users`, `ignored_bill_patterns` (created but currently unused by any endpoint), `ai_facts`, `ai_sessions`.
 
 ---
 
-## Accounts (Active)
+## Backend API Endpoints (verified against code 2026-07-03)
 
-| ID | Name | Type | Notes |
-|----|------|------|-------|
-| 1 | Holding (5253) | checking | Near-zero transit account |
-| 2 | Food (5784) | checking | Grocery/food spending |
-| 3 | Savings (5776) | savings | |
-| 4 | Bills (0831) | checking | **Primary bills account** — dashboard key metric |
-| 5 | UNSECURED FIXED RATE LOAN (3720) | loan | SimpleFin-synced, not in loans table |
-| 6 | Platinum Visa (7608) | credit | |
-| 7 | Anouk's - 529 (8198) | checking | 529 college savings |
-| 8 | Individual - Legacy Wealth Building (1198) | checking | Brokerage |
-| 9 | Anushka's Roth IRA Fidelity Go (3698) | checking | IRA |
-| 10 | Citi®/AAdvantage® (9174) | credit | |
-| 11 | Chase Freedom Unlimited (0406) | credit | Shows as checking type |
-| 12 | Personal Loan (8337) | loan | SimpleFin-synced, not in loans table |
-
----
-
-## Backend API Endpoints
-
-### Auth
-- `POST /api/auth/login`
-- `POST /api/auth/change-password`
-- `GET  /api/health`
-
-### Dashboard
-- `GET  /api/dashboard` — returns: `net_worth`, `assets`, `liabilities`, `net_worth_change`, `bills_balance`, `upcoming_bills[]`, `low_balance_warning`, `low_balance_threshold`, `has_simplefin`, `next_pay_date`, `accounts[]`, `encumbered_30d`, `recommended_transfer`, `food_balance`, `spendable_in_food`, `next_paycheck_date`, `days_until_paycheck`
+### Public (no auth)
+- `GET /api/health`
+- `POST /api/auth/login` · `POST /api/auth/change-password`
 
 ### Accounts
-- `GET  /api/accounts`
-- `POST /api/accounts`
-- `DELETE /api/accounts/{account_id}`
-- `PUT  /api/accounts/{acct_id}/debt-details`
+- `GET /api/accounts` (`?include_inactive=true`) — each row includes computed `balance` and `display_name` (nickname or name)
+- `POST /api/accounts` · `PUT /api/accounts/{id}` · `DELETE /api/accounts/{id}` (soft-delete, marks txns is_transfer=1)
+- `POST /api/accounts/{id}/reactivate` · `PUT /api/accounts/{id}/nickname` · `PUT /api/accounts/{id}/type` · `PUT /api/accounts/{id}/debt-details`
+
+### Dashboard & Calendar
+- `GET /api/dashboard` — balances, net worth, upcoming bills, payday projections per household member (`next_income` = `{<member_key>: …, soonest: …}`), day-by-day cash-flow simulation, `overdraft_warnings`, `suggested_transfer`. Fields `encumbered_30d`, `recommended_transfer`, `spendable_in_food` are **dead stubs always returning 0** (nothing in the frontend reads them).
+- `GET /api/calendar?month=YYYY-MM`
 
 ### Bills
-- `GET  /api/bills` — returns active bills with all 13 columns + computed fields (`next_due`, `days_until`, `rolling_min`, `rolling_max`)
-- `POST /api/bills` — accepts: `name`, `expected_amount`, `confidence`, `day_of_month`, `account_id`, `bill_type`, `payment_type`, `from_debt_budget`, `linked_loan_id`, `linked_account_id`, `notes`
-- `PUT  /api/bills/{bill_id}` — same fields as POST
-- `PATCH /api/bills/{bill_id}/type`
-- `PUT  /api/bills/{bill_id}/paid` — mark paid for a month
-- `DELETE /api/bills/{bill_id}`
-- `POST /api/bills/detect-statistical` — auto-detect bills from transactions
-- `POST /api/bills/detect-ignore`
-- `POST /api/bills/detect-ai`
-- `GET  /api/bills/history`
-- `GET  /api/line-items` — legacy endpoint; bills with paid status for current month (used by Calendar, not Bills tab)
+- `GET /api/bills` — computed: `next_due`, `days_until`, `rolling_min/max`, `paid_this_month`, `monthly_equivalent` (weekly×52/12), `linked_name`
+- `POST /api/bills` · `PUT /api/bills/{id}` · `DELETE /api/bills/{id}` (soft-delete)
+- `PATCH /api/bills/{id}/type` · `PUT /api/bills/{id}/paid` · `GET /api/bills/history`
 
-### Loans
-- `GET  /api/loans` — returns loans with computed fields: `months_remaining`, `total_interest_remaining`, `payoff_date`, `linked_bill_id`, `linked_bill_amount`
-- `POST /api/loans`
-- `PUT  /api/loans/{loan_id}`
-- `DELETE /api/loans/{loan_id}`
-- `POST /api/loans/{loan_id}/set-bill` — creates/updates a `payment_type='Loan'` bill linked to this loan
+> The bill auto-detect endpoints this file used to list (`detect-statistical`, `detect-ignore`, `detect-ai`) and `GET /api/line-items` and `GET /api/forecast` **do not exist in main.py**. Nothing in the frontend calls them.
 
-### Debt
-- `GET  /api/debt/summary` — credit cards + loans with `interest_rate`, `minimum_payment`, `linked_bill_id`, `linked_bill_amount`
-- `POST /api/debt/set-bill` — creates/updates a `payment_type='Debt'` bill linked to a credit account
-- `GET  /api/debt/payoff-projection`
-- `GET  /api/debt/strategies?extra_monthly=N`
+### Loans & Debt
+- `GET/POST /api/loans` · `PUT/DELETE /api/loans/{id}` · `POST /api/loans/{id}/set-bill`
+- `GET /api/debt/summary` (includes `unlinked_debt_bills`) · `POST /api/debt/set-bill`
+- `GET /api/debt/payoff-projection` · `GET /api/debt/strategies?extra_monthly=N&cards_first=bool` (snowball vs avalanche simulation)
 
-### Transactions
-- `GET  /api/transactions`
-- `POST /api/transactions`
-- `PUT  /api/transactions/{txn_id}/category`
+### Transactions & Spending
+- `GET/POST /api/transactions` · `PUT /api/transactions/{id}/category` (`apply_to_merchant` creates a merchant rule)
 - `POST /api/transactions/dedup-pending`
+- `GET /api/spending/summary` · `GET /api/spending/transactions` · `GET /api/spending/top-merchants` · `GET /api/spending/merchants-by-category`
 
-### Spending
-- `GET  /api/spending/summary`
-- `GET  /api/spending/transactions`
-- `GET  /api/spending/top-merchants`
-- `GET  /api/spending/merchants-by-category`
-
-### Budgets
-- `GET  /api/budgets`
-- `PUT  /api/budgets/{category}`
-- `DELETE /api/budgets/{category}`
+### Budgets, Categories, Rules
+- `GET /api/budgets` · `GET /api/budgets/{primary}/breakdown` · `PUT/DELETE /api/budgets/{category}`
+- `GET/POST /api/categories` · `DELETE /api/categories/{name}` (base categories protected)
+- `GET /api/merchant-rules` · `DELETE /api/merchant-rules/{id}`
 
 ### Paychecks
-- `GET  /api/paychecks/upcoming`
-- `GET  /api/paychecks`
-- `POST /api/paychecks`
-- `PUT  /api/paychecks/{paycheck_id}`
+- `GET /api/paychecks` · `GET /api/paychecks/upcoming` · `POST /api/paychecks` · `PUT /api/paychecks/{id}`
+- **No DELETE** — auto-detected false positives currently require SQL to remove (known issue)
 
-### Categories & Rules
-- `GET  /api/categories`
-- `POST /api/categories`
-- `DELETE /api/categories/{name}`
-- `GET  /api/merchant-rules`
-- `DELETE /api/merchant-rules/{rule_id}`
-
-### Settings / TMRS
-- `GET  /api/settings`
-- `PUT  /api/settings/{key}`
-- `GET  /api/tmrs` — reads 4 keys: `contribution_balance`, `monthly_benefit`, `monthly_contribution`, `years_of_service`
-- `PUT  /api/tmrs` — writes provided non-null TMRS keys
-
-### Calendar & Forecast
-- `GET  /api/calendar`
-- `GET  /api/forecast`
-
-### Sync & Import
-- `POST /api/sync` — trigger SimpleFin sync
-- `GET  /api/sync/log`
-- `POST /api/simplefin/setup`
-- `POST /api/simplefin/reset`
-- `POST /api/import/csv`
-
-### Net Worth
+### Settings / TMRS / Sync / Import / Net worth
+- `GET /api/settings` · `PUT /api/settings/{key}` (jwt_secret and simplefin_access_url blocked)
+- `GET/PUT /api/tmrs`
+- `POST /api/sync` · `GET /api/sync/log` · `POST /api/simplefin/setup` · `POST /api/simplefin/reset`
+- `POST /api/import/csv?account_id=N` (USAA or Chase format)
 - `POST /api/net-worth/snapshot`
 
 ### AI
-- `POST /api/ai/chat`
-- `GET  /api/ai/health`
-- `GET  /api/ai/models`
-- `POST /api/ai/test`
-- `POST /api/ai/suggest-categories`
-- `GET  /api/ai/context`
-- `GET  /api/ai/memory`
-- `POST /api/ai/memory/session`
-- `GET  /api/ai/memory/sessions`
-- `GET  /api/ai/memory/sessions/{session_id}/transcript`
-- `PUT  /api/ai/memory/facts/{fact_id}`
-- `DELETE /api/ai/memory/facts/{fact_id}`
-- `DELETE /api/ai/memory/facts`
-- `DELETE /api/ai/memory/sessions`
+- `POST /api/ai/chat` (rate-limited 20/min, streams) · `GET /api/ai/health` · `GET /api/ai/models` · `POST /api/ai/test`
+- `POST /api/ai/suggest-categories` · `GET /api/ai/context`
+- Memory: `GET /api/ai/memory` · `POST /api/ai/memory/session` · `GET /api/ai/memory/sessions` · `GET /api/ai/memory/sessions/{id}/transcript` · `PUT/DELETE /api/ai/memory/facts/{id}` · `DELETE /api/ai/memory/facts` · `DELETE /api/ai/memory/sessions`
 
 ---
 
 ## Frontend Pages (`src/pages/`)
 
-| File | Tab | Status |
-|------|-----|--------|
-| `Dashboard.jsx` | Dashboard | 3-card layout: Money Flow (Bills acct + encumbered + transfer), Spending Power (spendable_in_food + paycheck countdown), Accounts (collapsible). ✓ Session 4 |
-| `Overview.jsx` | Overview | Net Worth → Assets/Liabilities → Debt Payoff Timeline → Loans card (full CRUD) → TMRS card. ✓ Session 5 |
-| `Bills.jsx` | Bills | Flat ledger from `GET /api/bills`, TypeBadge (Recurring/Loan/Debt), ConfBadge (Fixed/Variable), Add/Edit/Delete modal. ✓ Session 5 |
-| `Debt.jsx` | Debt | CreditCardDebtEditor + LoanCard. "Set as Bill" wired for both credit and loans. ✓ Session 3 |
-| `Spending.jsx` | Spending | Transaction browser + merchant rules |
-| `Budget.jsx` | Budget | Budget limits by category |
-| `Calendar.jsx` | Calendar | Bill/paycheck calendar view, running balance toggle |
-| `LineItems.jsx` | — | Legacy — old Bills UI, not routed in App.jsx, kept for reference |
-| `AI.jsx` | AI | Chat with AI assistant |
-| `Settings.jsx` | Settings | App settings + TMRS inputs |
+Dashboard, Overview, Accounts, Calendar, Spending, Budget, Bills, Debt, About, AI, Settings, Login.
+(`LineItems.jsx`, listed in older versions of this file, does not exist.)
+
+`src/lib/dashboardFields.js` — shared getters for dashboard payload fields displayed on multiple pages (currently `getMonthlyIncome`). Add a getter there for any field more than one page reads.
+
+Settings page sections: SimpleFin, AI Assistant, AI Memory, Dashboard (threshold/buffer), **Household** (members, payroll keywords, pay ranges — Session 6), **Account Roles** (Bills/Food account pickers — Session 6), Paycheck Schedule (per member, dynamic), CSV Import, Auto-Category Rules, Change Password.
 
 ---
 
 ## Key Business Logic
 
-### Spendable / Transfer Calculation (in `GET /api/dashboard`)
-1. `encumbered_30d` — sum of bill amounts due within 30 days
-2. `recommended_transfer` = `max(0, bills_balance - encumbered_30d)` — safe to move from Bills → Food
-3. `spendable_in_food` = `food_balance + recommended_transfer`
-4. `next_paycheck_date` / `days_until_paycheck` — next `expected_date` from `paychecks` table
+### Paycheck detection (sync.py `_detect_paychecks`)
+Runs after each sync. A checking-account deposit > $500 is a paycheck if it matches generic payroll keywords or any household member's `payroll_keywords`; otherwise only if it lands on a configured payday day-of-week ±1 day (Session 6 — was hardcoded Thu/Fri). Attribution: member keywords first, then member pay-range (`amount_min`/`amount_max`), then first member. Skip keywords: interest/principal/transfer/zelle/venmo/refund.
 
-### Bill `payment_type` Field
-- `Recurring` — standard recurring bill (default; all existing bills backfilled to this)
-- `Loan` — payment linked to a `loans` row via `linked_loan_id`; confidence locked to Fixed in UI
-- `Debt` — payment linked to a credit `accounts` row via `linked_account_id`; confidence locked to Fixed in UI
-- Legacy `bill_type` (`required`/`optional`) still exists in DB but is no longer used by Bills.jsx
+### Payday projection (`detect_next_payday`)
+Anchored to configured day-of-week + frequency per member, not "last paycheck + interval," so a holiday-shifted deposit doesn't permanently drift the schedule. Amounts averaged from recent actuals with outlier trim.
 
-### Overview Loans Card
-- Loads from `GET /api/loans` (manually-tracked amortization data, NOT SimpleFin loan accounts)
-- SimpleFin loan accounts (ids 5, 12) appear in the Liabilities breakdown but not in this card
-- Add/Edit modal fields: Name, Loan Type, Original Balance, Current Balance, Interest Rate %, Monthly Payment, Start Date, Total Payments (term), Payments Made
+### Dashboard safe-to-spend
+Day-by-day simulation of bills out / paychecks in over 60 days; `safe_today` = lowest projected balance minus `safe_spend_buffer`. `suggested_transfer = max(0, safe_today)`. Same simulation feeds `overdraft_warnings`.
 
-### Overview TMRS Card
-- Title: "TEXAS MUNICIPAL RETIREMENT SYSTEM"
-- Subtitle: "Updated manually from your TMRS statement"
-- 4 fields: Contribution Balance, Est. Monthly Benefit, Monthly Contribution (note: "Used in budget calculations"), Years of Service
-- Positioned below the Loans card (bottom of Overview page)
-- Renders only when `GET /api/tmrs` returns non-null (always renders — API always returns a dict even if empty)
+### Bill `payment_type`
+`Recurring` (default) · `Loan` (linked_loan_id) · `Debt` (linked_account_id). Weekly bills use `frequency='weekly'` + `day_of_week`; their monthly cost is `monthly_equivalent`.
+
+### Scheduler (sync.py, started from lifespan)
+2:00am daily SimpleFin sync · 3:00am net-worth snapshot · 3:30am DB backup (keep 14).
 
 ---
 
-## Session History
+## Known Issues (from Session 6 QC review — not yet fixed)
 
-| Session | Date | Focus | Status |
-|---------|------|-------|--------|
-| Session 1 | ~2026-06-05 | Bills system overhaul | DB migration ✓, bill CRUD routes ✓ (backfilled payment_type), Bills.jsx rewrite ✗ |
-| Session 2 | ~2026-06-05 | Overview tab: Loans + TMRS | TMRS backend routes ✓, Overview UI ✗ |
-| Session 3 | ~2026-06-06 | Debt tab: set-bill wiring | All complete ✓ |
-| Session 4 | ~2026-06-06 | Dashboard cleanup | Dashboard.jsx 3-card rewrite ✓, HEARTH-CONTEXT.md created ✓ |
-| Session 5 | 2026-06-14 | Finish Bills + Overview Loans/TMRS | All 5 sections complete ✓ |
-
-### Session 5 Changes (2026-06-14)
-1. **Backend** — `POST /api/bills` and `PUT /api/bills/{id}` updated to accept/persist `payment_type`, `from_debt_budget`, `linked_loan_id`, `linked_account_id`, `notes`
-2. **Bills.jsx** — Full rewrite: flat ledger from `GET /api/bills`, TypeBadge (Recurring/Loan/Debt), ConfBadge (Fixed/Variable), Add/Edit modal, inline delete confirm
-3. **Overview.jsx — Loans card** — New card after Debt Payoff Timeline: `GET /api/loans`, full CRUD with `LoanModal` (9 fields), table columns Name|Balance|Rate|Payment|Payoff
-4. **Overview.jsx — TMRS card** — Updated title/subtitle, added "Used in budget calculations" note, moved to bottom (after Loans card)
-5. **Deploy path corrected** — nginx serves from `/var/www/hearth/` not `/var/www/finance/`; all previous sessions had been deploying to the wrong directory
-
----
+1. **Sync fuzzy dedup can drop real transactions** — same account + amount within 1 day with different descriptions is treated as a duplicate (sync.py). Two distinct same-priced purchases on the same day → second one never imported.
+2. **Account deactivate→reactivate corrupts is_transfer flags** — reactivation clears the flag on ALL the account's transactions, including genuine transfers.
+3. **No rate limit on `/api/auth/login`** (slowapi is only on ai/chat). LAN-only deployment, so low urgency.
+4. **`verify=False` on SimpleFin HTTPS calls** — TLS verification disabled for real banking traffic; only the internal AI gateway needs it.
+5. **CORS `allow_origins=["*"]`**.
+6. **No paycheck DELETE endpoint/UI** — phantom auto-detected paychecks require SQL to remove.
+7. **No input validation** — endpoints parse raw JSON without Pydantic models; missing fields → 500.
+8. DB connections leak when an endpoint raises (no try/finally); harmless single-user, sloppy pattern.
 
 ## Constraints & Gotchas
 
-- **`bcrypt` pinned to `4.0.1`** — do NOT touch `requirements.txt`
-- **Deploy target is `/var/www/hearth/`** — `/var/www/finance/` exists but nginx does NOT serve it
-- **Node via nvm** — always `source ~/.nvm/nvm.sh` before any `npm` command
-- **Auth required on all API routes** — curl tests fail with 401; use direct SQLite queries to verify DB state
-- **`sudo` is interactive** — deploy steps must be given to user to run; cannot run non-interactively
-- **DB migrations are idempotent** — `ALTER TABLE … ADD COLUMN` in `try/except OperationalError`; safe to re-run
-- **`LineItems.jsx`** — old Bills UI preserved as a file but not imported/routed; ignore it
+- **bcrypt must stay < 4.1** (passlib 1.7.4 incompat). Installed: 3.2.2, pinned in requirements.txt.
+- **Deploy target is `/var/www/hearth/`** — `/var/www/finance/` exists but is not served.
+- **Node via nvm** — `source ~/.nvm/nvm.sh` before any npm command.
+- **Auth required on all API routes** — curl tests need a Bearer token; or query SQLite directly.
+- **`sudo` is interactive** — deploy/restart steps must be given to the user to run.
+- **Commit to git after every working change**; never commit finance.db.
+
+## Session History
+
+| Session | Date | Focus |
+|---------|------|-------|
+| 1–2 | ~2026-06-05 | Bills overhaul, Overview Loans/TMRS backend |
+| 3–4 | ~2026-06-06 | Debt set-bill wiring, Dashboard 3-card rewrite |
+| 5 | 2026-06-14 | Bills.jsx rewrite, Overview Loans/TMRS UI, deploy path fix |
+| 6 | 2026-07-03 | QC review: git repo + .gitignore, pinned requirements.txt, nightly DB backups, nickname/display_name migrations, configurable household (Settings → Household), explicit Bills/Food account roles, payroll detection tied to configured paydays, this file audited & rewritten |

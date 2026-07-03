@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import json
 from datetime import datetime, date, timedelta
 import httpx
 
@@ -240,14 +241,53 @@ def _map_account_type(sf_acct: dict) -> str:
         return "investment"
     return "checking"
 
-_AUSTIN_KEYWORDS = ["city of georgeto", "city of georgetown", "georgetown payroll"]
-_ANUSHKA_KEYWORDS = ["staffmark", "staf mark", "staffmark invest"]
+# Household members are configurable in Settings (settings key: household_members,
+# a JSON list). These defaults exist only so a database from before the setting
+# existed keeps behaving exactly as it did when the values were hardcoded — they
+# are seeded into settings on startup and edited there, never here.
+DEFAULT_HOUSEHOLD = [
+    {
+        "key": "austin", "label": "Austin",
+        "payroll_keywords": ["city of georgeto", "city of georgetown", "georgetown payroll"],
+        "amount_min": 1800, "amount_max": None,
+        "default_frequency": "biweekly",
+    },
+    {
+        "key": "anushka", "label": "Anushka",
+        "payroll_keywords": ["staffmark", "staf mark", "staffmark invest"],
+        "amount_min": 1300, "amount_max": 1650,
+        "default_frequency": "weekly",
+    },
+]
+
+def get_household(conn) -> list:
+    raw = get_setting(conn, "household_members")
+    if raw:
+        try:
+            members = json.loads(raw)
+            if isinstance(members, list) and members:
+                return members
+        except (ValueError, TypeError):
+            pass
+    return DEFAULT_HOUSEHOLD
+
+_GENERIC_PAYROLL_KEYWORDS = ["payroll", "direct dep", "ach deposit", "salary", "wages", "paycheck"]
 _SKIP_KEYWORDS = ["interest", "principal", "transfer", "zelle", "venmo", "refund"]
 
 def _detect_paychecks(conn):
     """Scan checking transactions for likely paycheck deposits and log them."""
     today = date.today()
     since = (today - timedelta(days=60)).isoformat()
+
+    members = get_household(conn)
+    member_keywords = [k for m in members for k in (m.get("payroll_keywords") or [])]
+    # Fallback for deposits with no payroll keyword: only trust the configured
+    # payday day-of-week (±1 day for holiday shifts), not a hardcoded Thu/Fri.
+    # This is what keeps a random large deposit from becoming a phantom paycheck.
+    payday_dows = set()
+    for m in members:
+        dow = int(get_setting(conn, f"payday_dow_{m['key']}", "3"))
+        payday_dows.update({(dow - 1) % 7, dow, (dow + 1) % 7})
 
     accounts = conn.execute(
         "SELECT id FROM accounts WHERE type='checking' AND is_active=1"
@@ -264,12 +304,12 @@ def _detect_paychecks(conn):
             if any(k in desc_lower for k in _SKIP_KEYWORDS):
                 continue
 
-            is_paycheck = any(k in desc_lower for k in [
-                "payroll", "direct dep", "ach deposit", "salary", "wages", "paycheck",
-            ] + _AUSTIN_KEYWORDS + _ANUSHKA_KEYWORDS)
+            is_paycheck = any(
+                k in desc_lower for k in _GENERIC_PAYROLL_KEYWORDS + member_keywords
+            )
             if not is_paycheck and txn["amount"] > 500:
                 txn_date = date.fromisoformat(txn["transaction_date"])
-                if txn_date.weekday() in (3, 4):
+                if txn_date.weekday() in payday_dows:
                     is_paycheck = True
 
             if not is_paycheck:
@@ -282,7 +322,7 @@ def _detect_paychecks(conn):
             if exists:
                 continue
 
-            person = _identify_paycheck_person(desc_lower, float(txn["amount"]))
+            person = _identify_paycheck_person(desc_lower, float(txn["amount"]), members)
             conn.execute(
                 """INSERT INTO paychecks (person, actual_amount, actual_date, notes)
                    VALUES (?,?,?,?)""",
@@ -290,26 +330,43 @@ def _detect_paychecks(conn):
             )
     conn.commit()
 
-def _identify_paycheck_person(desc_lower: str, amount: float) -> str:
-    if any(k in desc_lower for k in _AUSTIN_KEYWORDS):
-        return "austin"
-    if any(k in desc_lower for k in _ANUSHKA_KEYWORDS):
-        return "anushka"
-    # Amount heuristic based on observed pay ranges
-    if 1300 <= amount <= 1650:
-        return "anushka"
-    if amount >= 1800:
-        return "austin"
-    return "austin"
+def _identify_paycheck_person(desc_lower: str, amount: float, members: list) -> str:
+    for m in members:
+        if any(k in desc_lower for k in (m.get("payroll_keywords") or [])):
+            return m["key"]
+    # Amount heuristic — each member's typical pay range from household settings
+    for m in members:
+        lo, hi = m.get("amount_min"), m.get("amount_max")
+        if lo is None and hi is None:
+            continue
+        if (lo is None or amount >= lo) and (hi is None or amount <= hi):
+            return m["key"]
+    return members[0]["key"]
 
-def _guess_paycheck_person(conn, txn_date: date, amount: float) -> str:
-    recent = conn.execute(
-        "SELECT person, actual_amount FROM paychecks ORDER BY actual_date DESC LIMIT 4"
-    ).fetchall()
-    for r in recent:
-        if abs(float(r["actual_amount"] or 0) - amount) < 100:
-            return r["person"]
-    return "austin"
+BACKUP_DIR = os.path.join(os.path.dirname(__file__), "backups")
+BACKUP_KEEP = 14
+
+def backup_database():
+    """Nightly snapshot of finance.db using sqlite's online backup API (safe while
+    the app is running, unlike copying the file, which can catch a half-written
+    WAL state). Keeps the newest BACKUP_KEEP files and deletes the rest."""
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    dest_path = os.path.join(BACKUP_DIR, f"finance-{stamp}.db")
+    src = sqlite3.connect(DB_PATH)
+    dest = sqlite3.connect(dest_path)
+    try:
+        src.backup(dest)
+    finally:
+        dest.close()
+        src.close()
+    backups = sorted(
+        f for f in os.listdir(BACKUP_DIR)
+        if f.startswith("finance-") and f.endswith(".db")
+    )
+    for old in backups[:-BACKUP_KEEP]:
+        os.remove(os.path.join(BACKUP_DIR, old))
+    return dest_path
 
 def start_scheduler():
     try:
@@ -359,6 +416,21 @@ def start_scheduler():
             hour=3,
             minute=0,
             id="daily_net_worth",
+            replace_existing=True,
+        )
+
+        async def backup_job():
+            try:
+                backup_database()
+            except Exception as e:
+                print(f"Database backup failed: {e}", flush=True)
+
+        scheduler.add_job(
+            backup_job,
+            "cron",
+            hour=3,
+            minute=30,
+            id="daily_db_backup",
             replace_existing=True,
         )
         scheduler.start()
