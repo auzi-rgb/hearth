@@ -438,6 +438,20 @@ export default function Dashboard({ active, navigateTo }) {
         </div>
       )}
 
+      {/* ── True surplus: simulation says there's more than the usual transfer ── */}
+      {data.sweep_suggestion && (
+        <div className="apple-card" style={{ padding: '16px 22px', marginBottom: 16, borderLeft: '3px solid var(--accent)' }}>
+          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
+            True surplus available: <span style={{ color: 'var(--accent-text)', fontVariantNumeric: 'tabular-nums' }}>{money(data.sweep_suggestion.amount)}</span>
+          </div>
+          <div style={{ fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.55 }}>
+            Today's safe-to-transfer runs {money(data.sweep_suggestion.amount)} above your typical transfer
+            of {money(data.sweep_suggestion.typical_transfer)}. The simulation reserved every upcoming bill —
+            including next month's first week — before saying this, so it's genuinely free.
+          </div>
+        </div>
+      )}
+
       {/* ── Cards 1 + 2: side-by-side on tablet/desktop ────────────────────── */}
       <div style={{
         display: 'grid',
@@ -608,6 +622,15 @@ export default function Dashboard({ active, navigateTo }) {
           {lastXfer
             ? `Last recorded: ${money(lastXfer.amount)} on ${new Date(lastXfer.transfer_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
             : 'Transfer to the Food account, then record it to track your real spending rate'}
+        </div>
+        {/* A number you act on is only as good as its inputs — confess freshness */}
+        <div style={{ fontSize: 11, textAlign: 'center', marginTop: 4,
+          color: data.sync_stale ? 'var(--red)' : 'var(--text-tertiary)' }}>
+          {data.sync_stale
+            ? `⚠ Balances are stale${data.last_sync_at ? ` — last sync ${new Date(data.last_sync_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}` : ''}. Sync before trusting this number.`
+            : data.last_sync_at
+              ? `Based on balances synced ${new Date(data.last_sync_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`
+              : null}
         </div>
       </div>
 

@@ -9,7 +9,17 @@
 // only requires updating one call site instead of hunting through every page.
 
 // Total paychecks landing within the calendar month: already received + still projected.
-// This is THE income figure — always all paychecks for the month, nothing else mixed in.
+// This is the ACTUAL income figure for the month. It inflates in extra-paycheck
+// months — do NOT budget against it; that's what the baseline below is for.
 export function getMonthlyIncome(dash) {
   return dash?.monthly_income ?? 0
+}
+
+// What a NORMAL month brings in (usual paycheck count × median recent check,
+// or the household's manual override). This is THE number for anything
+// planning-shaped: available-to-budget, the About page bands, "vs plan"
+// comparisons. Extra-paycheck money is deliberately excluded — the cash-flow
+// simulation (safe-to-transfer) handles it instead.
+export function getBaselineIncome(dash) {
+  return dash?.baseline_income ?? getMonthlyIncome(dash)
 }

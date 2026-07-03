@@ -490,6 +490,9 @@ async def generate_coach_briefing() -> dict:
         ctx["projected_low_point_minus_buffer"] = d.get("safe_today")
         ctx["overdraft_warnings_count"] = len(d.get("overdraft_warnings") or [])
         ctx["next_transfer_date"] = d.get("next_transfer_date")
+        ctx["baseline_monthly_income"] = d.get("baseline_income")
+        ctx["this_month_income_vs_baseline"] = d.get("income_vs_baseline")
+        ctx["true_surplus_above_typical_transfer"] = (d.get("sweep_suggestion") or {}).get("amount")
     except Exception:
         pass
 
@@ -509,6 +512,8 @@ Field meanings (be precise about these):
 - discretionary_spent_month_to_date: spent so far THIS month.
 - discretionary_same_period_last_month: spent over the SAME NUMBER OF DAYS at the start of LAST MONTH (a month-over-month comparison — never say "last year").
 - safe_to_transfer_today: from a day-by-day simulation that already reserves money for every upcoming bill in the next 60 days, INCLUDING bills early next month. When advising what is free to move, spend, or send at debt, use THIS number and only this number. Never reason from "income minus bills for the month" — a paycheck landing near month-end usually funds the next month's first bills, and calling it extra money is a mistake this household has explicitly asked you not to make.
+- baseline_monthly_income: what a NORMAL month brings in — the number their budget is built on. this_month_income_vs_baseline above zero means an extra-paycheck month; that extra is handled by the cash-flow simulation, not the budget, so do not suggest changing budget categories because of it.
+- true_surplus_above_typical_transfer: if present, this is genuinely free money — the simulation reserved everything first. This is the ONLY number you may ever call surplus.
 
 Today's numbers:
 {json.dumps(ctx, indent=1)}"""

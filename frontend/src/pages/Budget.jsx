@@ -18,12 +18,15 @@
  * always render immediately, even when /api/budgets returns empty.
  * The DB is kept in sync as a secondary store.
  *
- * Income is ALWAYS read via getMonthlyIncome() from lib/dashboardFields — never
- * read a dashboard field by name directly, that's exactly how this page and the
- * Dashboard ended up disagreeing about "Monthly Income" for a while.
+ * Income is ALWAYS read via getBaselineIncome() from lib/dashboardFields — the
+ * NORMAL-month figure, so budget math is identical every month. Extra-paycheck
+ * months inflate the calendar total; that extra is handled by the Dashboard's
+ * cash-flow simulation, never by the budget. Never read a dashboard field by
+ * name directly — that's exactly how this page and the Dashboard ended up
+ * disagreeing about "Monthly Income" for a while.
  */
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { getMonthlyIncome } from '../lib/dashboardFields'
+import { getMonthlyIncome, getBaselineIncome } from '../lib/dashboardFields'
 import Portal from '../components/Portal'
 
 const API = '/hearth/api'
@@ -144,10 +147,13 @@ const Sep = () => (
   <div style={{ width: 1, height: 28, background: 'var(--border)', margin: '0 16px', flexShrink: 0 }} />
 )
 
-function IncomeSummary({ income, fixedTotal, savingsTotal, allocatedTotal, onSuggest }) {
+function IncomeSummary({ income, actualIncome, fixedTotal, savingsTotal, allocatedTotal, onSuggest }) {
   const availableToBudget = income - fixedTotal - savingsTotal
   const surplus = availableToBudget - allocatedTotal
   const over = surplus < 0
+  // Meaningful gap between this month's actual paychecks and the baseline —
+  // shown as a note, never mixed into the budget math.
+  const extraThisMonth = actualIncome > income + 50 ? actualIncome - income : null
 
   const Chip = ({ label, value, color }) => (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -160,7 +166,16 @@ function IncomeSummary({ income, fixedTotal, savingsTotal, allocatedTotal, onSug
   return (
     <div style={{ background: 'var(--bg-card)', borderRadius: 'var(--radius)',
       padding: '12px 20px', display: 'flex', alignItems: 'center', gap: 0, flexWrap: 'wrap' }}>
-      <Chip label="Income" value={money(income)} />
+      <Chip label="Baseline Income" value={money(income)} />
+      {extraThisMonth && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginLeft: 10 }}>
+          <span style={{ fontSize: 11, color: 'var(--text-tertiary)', whiteSpace: 'nowrap' }}>this month actual</span>
+          <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent-text)', whiteSpace: 'nowrap' }}
+            title="Extra-paycheck month — the extra is handled by the Dashboard's safe-to-transfer cash flow, not the budget">
+            {money(actualIncome)} (+{money(extraThisMonth)} → cash flow)
+          </span>
+        </div>
+      )}
       <Sep />
       <Chip label="Fixed Bills" value={`− ${money(fixedTotal)}`} color="var(--text-secondary)" />
       <Sep />
@@ -460,10 +475,13 @@ export default function Budget({ active, onAlert, navigateTo }) {
   const [bills, setBills] = useState([])
   const [billsLoading, setBillsLoading] = useState(true)
 
-  // Income — always the live monthly_income from /api/dashboard. No manual override:
-  // a stale override silently masking the real figure is exactly the kind of "two
-  // sources of truth" bug this page already burned us on once.
+  // Income — the BASELINE (normal-month) figure from /api/dashboard, so budget
+  // math stays identical every month. actualIncome is kept only for the
+  // annotation showing this month's difference. No manual state override here:
+  // a stale override silently masking the real figure is exactly the kind of
+  // "two sources of truth" bug this page already burned us on once.
   const [income, setIncome] = useState(0)
+  const [actualIncome, setActualIncome] = useState(0)
 
   // Real categories — source of truth: GET /api/categories. primaries carries
   // each primary's secondaries (for the click-to-expand breakdown); base/custom
@@ -588,7 +606,8 @@ export default function Budget({ active, onAlert, navigateTo }) {
   const loadIncome = useCallback(async () => {
     try {
       const dash = await fetch(`${API}/dashboard`).then(r => r.json())
-      setIncome(getMonthlyIncome(dash))
+      setIncome(getBaselineIncome(dash))
+      setActualIncome(getMonthlyIncome(dash))
     } catch {}
   }, [])
 
@@ -760,6 +779,7 @@ export default function Budget({ active, onAlert, navigateTo }) {
       <div style={{ marginBottom: 20 }}>
         <IncomeSummary
           income={income}
+          actualIncome={actualIncome}
           fixedTotal={fixedTotal}
           savingsTotal={savingsTotal}
           allocatedTotal={allocatedTotal}

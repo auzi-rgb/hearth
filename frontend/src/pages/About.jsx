@@ -20,7 +20,7 @@
  *   - Accuracy strip: GET /api/bills/creep (drift) + GET /api/sync/log (freshness)
  */
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { getMonthlyIncome } from '../lib/dashboardFields'
+import { getMonthlyIncome, getBaselineIncome } from '../lib/dashboardFields'
 
 const API = '/hearth/api'
 
@@ -299,7 +299,12 @@ export default function About({ active, navigate }) {
 
   useEffect(() => { if (active) load() }, [active, load])
 
-  const income = getMonthlyIncome(dash)
+  // Bands are drawn from BASELINE income — the planning picture. An
+  // extra-paycheck month would otherwise stretch the paycheck bar and make
+  // "available" look double its real self; the actual figure shows as a stat.
+  const income = getBaselineIncome(dash)
+  const actualIncome = getMonthlyIncome(dash)
+  const extraThisMonth = actualIncome > income + 50 ? actualIncome - income : null
   const fixedBills = useMemo(
     () => bills.filter(b => b.payment_type === 'Recurring').reduce((s, b) => s + (b.monthly_equivalent ?? b.expected_amount ?? 0), 0),
     [bills]
@@ -360,7 +365,8 @@ export default function About({ active, navigate }) {
 
       {/* Top stat strip */}
       <div className="apple-card" style={{ padding: '18px 24px', display: 'flex', gap: 28, flexWrap: 'wrap', marginBottom: 24 }}>
-        <StatCard label="Monthly income" value={money(income)} />
+        <StatCard label="Baseline income" value={money(income)} />
+        {extraThisMonth && <StatCard label="This month actual" value={money(actualIncome)} color="var(--accent-text)" />}
         <StatCard label="Bills" value={`-${money(fixedBills)}`} color="var(--red)" />
         <StatCard label="Debt" value={`-${money(debtBills)}`} color="var(--orange)" />
         <StatCard label="Savings" value={`-${money(savings)}`} color="var(--accent-text)" />
@@ -386,7 +392,7 @@ export default function About({ active, navigate }) {
           {/* Plain-language summary sentence */}
           {!loading && (
             <div style={{ marginTop: 18, fontSize: 14, color: 'var(--text-secondary)', textAlign: 'center', lineHeight: 1.6 }}>
-              Out of every <strong style={{ color: 'var(--text-primary)' }}>{money(income)}</strong> paycheck,{' '}
+              Out of a normal month's <strong style={{ color: 'var(--text-primary)' }}>{money(income)}</strong>,{' '}
               <strong style={{ color: 'var(--red)' }}>{money(fixedBills)}</strong> is already claimed by bills and{' '}
               <strong style={{ color: 'var(--orange)' }}>{money(debtBills)}</strong> by debt before you ever see it —
               another <strong style={{ color: 'var(--accent-text)' }}>{money(savings)}</strong> goes to savings —

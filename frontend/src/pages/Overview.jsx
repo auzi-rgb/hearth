@@ -343,6 +343,7 @@ function MonthReviewCard({ active }) {
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginBottom: 10 }}>
                 {[
                   ['Income', money(r.income), 'var(--accent-text)'],
+                  r.income_vs_baseline != null ? ['vs Baseline', `${r.income_vs_baseline >= 0 ? '+' : ''}${money(r.income_vs_baseline)}`, Math.abs(r.income_vs_baseline) < 50 ? 'var(--text-secondary)' : 'var(--accent-text)'] : null,
                   ['Bills paid', `${money(r.obligations)} (${r.bills_paid_count})`, 'var(--text-primary)'],
                   ['Everyday spending', money(r.discretionary), 'var(--text-primary)'],
                   ['Surplus', money(r.surplus), r.surplus >= 0 ? 'var(--accent-text)' : 'var(--red)'],

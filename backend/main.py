@@ -12,6 +12,7 @@ import os
 import csv
 import io
 import math
+import statistics
 import json
 import re
 import calendar as cal_mod
@@ -757,6 +758,44 @@ def compute_month_income(conn) -> dict:
         "monthly_income": fmt_money(received_total + projected_total),
     }
 
+def compute_baseline_income(conn) -> dict:
+    """A NORMAL month's income — the planning number the budget is built on.
+    usual paycheck count × median of recent actual checks, per member: stable
+    across extra-paycheck months, self-updating after raises, and robust to
+    outlier deposits (a median ignores a stray misattributed $800). The
+    budget_baseline_income setting overrides the computation when set > 0.
+    Calendar-month actual income (compute_month_income) is deliberately NOT
+    used for budgeting — a paycheck landing near month-end mostly funds the
+    next month's first bills, so the calendar total overstates what a month
+    really has to work with."""
+    override = get_setting(conn, "budget_baseline_income")
+    try:
+        if override and float(override) > 0:
+            return {"baseline_income": fmt_money(float(override)), "baseline_source": "manual", "baseline_members": []}
+    except (ValueError, TypeError):
+        pass
+    total = 0.0
+    members_out = []
+    for m in get_household(conn):
+        freq = get_setting(conn, f"payday_frequency_{m['key']}", m.get("default_frequency") or "biweekly")
+        usual = 4 if freq == "weekly" else 2
+        amts = [
+            float(r["actual_amount"]) for r in conn.execute(
+                "SELECT actual_amount FROM paychecks WHERE person=? AND actual_amount IS NOT NULL ORDER BY actual_date DESC LIMIT 8",
+                (m["key"],)
+            ).fetchall()
+        ]
+        med = statistics.median(amts) if amts else 0.0
+        members_out.append({
+            "key": m["key"],
+            "label": m.get("label") or m["key"].capitalize(),
+            "usual_count": usual,
+            "median_check": fmt_money(med),
+            "baseline": fmt_money(med * usual),
+        })
+        total += med * usual
+    return {"baseline_income": fmt_money(total), "baseline_source": "computed", "baseline_members": members_out}
+
 def get_account_balance(conn, account_id: int) -> float:
     # Prefer the balance reported directly by SimpleFin — transaction sum is unreliable
     # because SimpleFin only returns a rolling window of transactions, not full history.
@@ -1360,6 +1399,39 @@ async def dashboard():
     ).fetchone()
     debt_change_month = round(debt_total - float(_prev_liab["liabilities"]), 2) if _prev_liab else None
 
+    # Baseline income — the planning number budgets are built on
+    _baseline = compute_baseline_income(conn)
+    income_vs_baseline = round(monthly_income - _baseline["baseline_income"], 2)
+
+    # Data freshness — safe-to-transfer is only actionable if balances are fresh
+    _sync_row = conn.execute(
+        "SELECT synced_at FROM sync_log WHERE status='ok' ORDER BY synced_at DESC LIMIT 1"
+    ).fetchone()
+    last_sync_at = _sync_row["synced_at"] if _sync_row else None
+    sync_stale = True
+    if last_sync_at:
+        try:
+            sync_stale = (datetime.now() - datetime.fromisoformat(last_sync_at)) > timedelta(hours=26)
+        except ValueError:
+            pass
+
+    # Surplus sweep: when today's simulated safe-to-transfer runs meaningfully
+    # above the household's typical recorded transfer, the excess is TRUE
+    # surplus — the simulation already reserved every upcoming bill (including
+    # next month's first week) before saying so. Requires transfer history, so
+    # the detection gets smarter the more transfers are recorded.
+    sweep_suggestion = None
+    _xfer_amounts = [
+        float(r["amount"]) for r in conn.execute(
+            "SELECT amount FROM transfers ORDER BY transfer_date DESC, id DESC LIMIT 6"
+        ).fetchall()
+    ]
+    if len(_xfer_amounts) >= 2:
+        _typical = statistics.median(_xfer_amounts)
+        _excess = round(suggested_transfer - _typical, 2)
+        if _excess >= 100:
+            sweep_suggestion = {"amount": _excess, "typical_transfer": fmt_money(_typical)}
+
     conn.close()
     return {
         "has_simplefin": has_simplefin,
@@ -1393,6 +1465,12 @@ async def dashboard():
         "monthly_bills_total": fmt_money(monthly_bills_total),
         "monthly_surplus": fmt_money(monthly_surplus),
         "suggested_transfer": fmt_money(suggested_transfer),
+        "baseline_income": _baseline["baseline_income"],
+        "baseline_source": _baseline["baseline_source"],
+        "income_vs_baseline": income_vs_baseline,
+        "last_sync_at": last_sync_at,
+        "sync_stale": sync_stale,
+        "sweep_suggestion": sweep_suggestion,
         "next_transfer_date": next_transfer.isoformat(),
         "days_until_next_transfer": days_until_next_transfer,
         "last_transfer": dict(_last_xfer) if _last_xfer else None,
@@ -2241,9 +2319,11 @@ async def income_summary(months: int = 6):
         for r in hist_rows
     ]
     totals = [h["total"] for h in history]
+    baseline = compute_baseline_income(conn)
     conn.close()
     return {
         **current,
+        **baseline,
         "history": list(reversed(history)),
         "average_monthly_income": fmt_money(sum(totals) / len(totals)) if totals else None,
         "months_in_average": len(totals),
@@ -2399,9 +2479,12 @@ def compute_month_review(conn, month: str) -> dict:
         debt_change = fmt_money(float(nw_last["liabilities"]) - float(nw_first["liabilities"]))
         net_worth_change = fmt_money(float(nw_last["net_worth"]) - float(nw_first["net_worth"]))
 
+    baseline = compute_baseline_income(conn)["baseline_income"]
     return {
         "month": month,
         "income": fmt_money(income),
+        "baseline_income": baseline,
+        "income_vs_baseline": fmt_money(income - baseline),
         "obligations": fmt_money(obligations),
         "bills_paid_count": bills_paid_count,
         "bills_unpaid_count": bills_unpaid_count,
