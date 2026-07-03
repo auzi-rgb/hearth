@@ -707,6 +707,56 @@ def detect_next_payday(conn, person: str) -> dict:
         "day_of_week": dow,
     }
 
+def compute_month_income(conn) -> dict:
+    """The current month's income, per member: paychecks already received plus
+    projected remaining paydays. Single source of truth for the dashboard's
+    monthly_income AND the Accounts income card — if they ever disagree, one of
+    them stopped calling this."""
+    today = date.today()
+    month_start = today.replace(day=1)
+    month_end = date(today.year, today.month, cal_mod.monthrange(today.year, today.month)[1])
+    out_members = []
+    received_total = 0.0
+    projected_total = 0.0
+    for m in get_household(conn):
+        rows = conn.execute(
+            "SELECT actual_date, actual_amount FROM paychecks WHERE person=? AND actual_amount IS NOT NULL AND actual_date >= ? AND actual_date <= ? ORDER BY actual_date",
+            (m["key"], month_start.isoformat(), month_end.isoformat())
+        ).fetchall()
+        received = [{"date": r["actual_date"], "amount": fmt_money(r["actual_amount"])} for r in rows]
+        r_total = sum(p["amount"] for p in received)
+        info = detect_next_payday(conn, m["key"])
+        projected = []
+        if info.get("next_date") and info.get("expected_amount"):
+            d = date.fromisoformat(info["next_date"])
+            amt = float(info["expected_amount"])
+            while d <= month_end:
+                if d >= today:
+                    projected.append({"date": d.isoformat(), "amount": fmt_money(amt)})
+                d += timedelta(weeks=info.get("interval_weeks", 2))
+        p_total = sum(p["amount"] for p in projected)
+        out_members.append({
+            "key": m["key"],
+            "label": m.get("label") or m["key"].capitalize(),
+            "frequency": info.get("frequency"),
+            "received": received,
+            "projected": projected,
+            "expected_count": len(received) + len(projected),
+            # A weekly earner usually sees 4 checks a month, biweekly 2 — more
+            # than that is an "extra paycheck month" worth calling out in the UI.
+            "usual_count": 4 if info.get("frequency") == "weekly" else 2,
+            "total": fmt_money(r_total + p_total),
+        })
+        received_total += r_total
+        projected_total += p_total
+    return {
+        "month": today.strftime("%Y-%m"),
+        "members": out_members,
+        "received_total": fmt_money(received_total),
+        "projected_total": fmt_money(projected_total),
+        "monthly_income": fmt_money(received_total + projected_total),
+    }
+
 def get_account_balance(conn, account_id: int) -> float:
     # Prefer the balance reported directly by SimpleFin — transaction sum is unreliable
     # because SimpleFin only returns a rolling window of transactions, not full history.
@@ -1155,18 +1205,10 @@ async def dashboard():
         b["amount"] for b in upcoming_bills
         if date.fromisoformat(b["due_date"]) <= month_end and not b["paid"]
     )
-    # Projected income remaining this month
-    projected_income_month = 0.0
-    for person, pay_info in pay_by_member.items():
-        if not pay_info.get("next_date") or not pay_info.get("expected_amount"):
-            continue
-        d = date.fromisoformat(pay_info["next_date"])
-        amt = float(pay_info["expected_amount"])
-        freq_weeks = pay_info.get("interval_weeks", 2)
-        while d <= month_end:
-            if d >= today:
-                projected_income_month += amt
-            d += timedelta(weeks=freq_weeks)
+    # Income this month — received + projected, from the shared helper
+    _month_income = compute_month_income(conn)
+    projected_income_month = _month_income["projected_total"]
+    monthly_income = _month_income["monthly_income"]
     # Cash available in Bills for the rest of the month = current balance + remaining paychecks.
     # NOT income — this is a cash-position snapshot, used only to project the month-end balance.
     available_cash_this_month = bills_balance + projected_income_month
@@ -1245,14 +1287,6 @@ async def dashboard():
     days_until_paycheck = (next_pay_date - today).days
     food_account = find_role_account(conn, "food", "food")
     food_balance = get_account_balance(conn, food_account["id"]) if food_account else 0.0
-
-    month_start = today.replace(day=1).isoformat()
-    already_received = float(conn.execute("""
-        SELECT COALESCE(SUM(actual_amount), 0)
-        FROM paychecks
-        WHERE actual_date >= ? AND actual_date <= date(?, '+1 month', 'start of month', '-1 day')
-    """, (month_start, month_start)).fetchone()[0])
-    monthly_income = already_received + projected_income_month
 
     # Monthly bills: full monthly obligation across all active bills.
     # Weekly bills (e.g. an accelerated card payoff) are converted to a monthly equivalent.
@@ -2185,6 +2219,34 @@ async def debt_strategies(extra_monthly: float = 0, cards_first: bool = True):
         "months_saved": snowball["months"] - avalanche["months"],
         "extra_monthly": extra_monthly,
         "cards_first": cards_first,
+    }
+
+# ── Income review ─────────────────────────────────────────────────────────────
+
+@router.get("/api/income/summary")
+async def income_summary(months: int = 6):
+    """Current month's paycheck breakdown (shared math with the dashboard) plus
+    recent complete-month totals and their average — so an extra-paycheck month
+    reads as 'expected: 8 checks this month' instead of looking like a bug."""
+    conn = get_db()
+    current = compute_month_income(conn)
+    hist_rows = conn.execute(
+        """SELECT strftime('%Y-%m', actual_date) as month, SUM(actual_amount) as total, COUNT(*) as checks
+           FROM paychecks WHERE actual_amount IS NOT NULL AND strftime('%Y-%m', actual_date) < ?
+           GROUP BY month ORDER BY month DESC LIMIT ?""",
+        (current["month"], months)
+    ).fetchall()
+    history = [
+        {"month": r["month"], "total": fmt_money(r["total"]), "checks": r["checks"]}
+        for r in hist_rows
+    ]
+    totals = [h["total"] for h in history]
+    conn.close()
+    return {
+        **current,
+        "history": list(reversed(history)),
+        "average_monthly_income": fmt_money(sum(totals) / len(totals)) if totals else None,
+        "months_in_average": len(totals),
     }
 
 # ── Transfers (Bills → Food) ──────────────────────────────────────────────────

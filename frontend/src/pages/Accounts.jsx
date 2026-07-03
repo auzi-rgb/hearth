@@ -129,6 +129,66 @@ function AddAccountModal({ anchor, onClose, onSave }) {
   )
 }
 
+// Income review — answers "where does the monthly income number come from?"
+// Shows this month's expected paycheck count per member (calling out
+// extra-paycheck months) against the average of recent complete months.
+function IncomeCard({ data }) {
+  if (!data || !data.members?.length) return null
+  const monthLabel = new Date(data.month + '-15T12:00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+  const fmtDay = d => new Date(d + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  const avg = data.average_monthly_income
+  const isHighMonth = data.members.some(m => m.expected_count > m.usual_count)
+
+  return (
+    <div className="apple-card" style={{ padding: '20px 24px', marginBottom: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 10, marginBottom: 4 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: 'var(--text-tertiary)' }}>
+          Income — {monthLabel}
+        </div>
+        {isHighMonth && (
+          <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--accent-text)',
+            background: 'rgba(52,199,89,0.12)', border: '1px solid rgba(52,199,89,0.3)',
+            borderRadius: 20, padding: '3px 10px' }}>
+            Extra-paycheck month
+          </span>
+        )}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 14, flexWrap: 'wrap', marginBottom: 14 }}>
+        <span style={{ fontSize: 30, fontWeight: 700, letterSpacing: '-0.04em', fontVariantNumeric: 'tabular-nums' }}>
+          {money(data.monthly_income)}
+        </span>
+        <span style={{ fontSize: 13, color: 'var(--text-secondary)', fontVariantNumeric: 'tabular-nums' }}>
+          {money(data.received_total)} received · {money(data.projected_total)} to come
+        </span>
+        {avg != null && (
+          <span style={{ fontSize: 13, color: 'var(--text-tertiary)', fontVariantNumeric: 'tabular-nums' }}>
+            typical month {money(avg)} <span style={{ fontSize: 11 }}>(avg of last {data.months_in_average})</span>
+          </span>
+        )}
+      </div>
+      {data.members.map(m => {
+        const extra = m.expected_count > m.usual_count
+        return (
+          <div key={m.key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+            gap: 12, padding: '8px 0', borderTop: '1px solid var(--border)', fontSize: 13, flexWrap: 'wrap' }}>
+            <span>
+              <span style={{ fontWeight: 600 }}>{m.label}</span>
+              <span style={{ color: 'var(--text-tertiary)', marginLeft: 8 }}>{m.frequency}</span>
+              <span style={{ marginLeft: 8, color: extra ? 'var(--accent-text)' : 'var(--text-secondary)', fontWeight: extra ? 600 : 400 }}>
+                {m.expected_count} paycheck{m.expected_count !== 1 ? 's' : ''} this month{extra ? ` (usually ${m.usual_count})` : ''}
+              </span>
+            </span>
+            <span style={{ color: 'var(--text-secondary)', fontVariantNumeric: 'tabular-nums', textAlign: 'right' }}>
+              {m.received.map(p => `${fmtDay(p.date)} ✓`).concat(m.projected.map(p => fmtDay(p.date))).join(' · ')}
+              <span style={{ fontWeight: 700, color: 'var(--text-primary)', marginLeft: 10 }}>{money(m.total)}</span>
+            </span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 const COL = '1fr 130px 120px 110px 84px 84px 84px 90px'
 
 // Dashboard roles an account can play. Held here (on the account itself) rather
@@ -314,6 +374,7 @@ export default function Accounts({ active }) {
   const [showInactive, setShowInactive] = useState(false)
   const [addAnchor, setAddAnchor] = useState(null)
   const [roles, setRoles] = useState({ bills: '', food: '' })
+  const [income, setIncome] = useState(null)
   const isMobile = useIsMobile()
 
   const [csvAccountId, setCsvAccountId] = useState('')
@@ -333,6 +394,7 @@ export default function Accounts({ active }) {
       setManualLoans(Array.isArray(loans) ? loans : [])
       setRoles({ bills: settings.bills_account_id || '', food: settings.food_account_id || '' })
     } catch {}
+    fetch(`${API}/income/summary`).then(r => r.json()).then(setIncome).catch(() => {})
   }, [])
 
   useEffect(() => { if (active) load() }, [active, load])
@@ -417,6 +479,7 @@ export default function Accounts({ active }) {
 
   return (
     <div className="page-enter" style={{ padding: isMobile ? '20px 16px 80px' : '32px 36px 80px' }}>
+      <IncomeCard data={income} />
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, marginBottom: 24 }}>
         <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
           {accounts.filter(a => a.is_active).length} active · {accounts.filter(a => !a.is_active).length} inactive
