@@ -322,7 +322,7 @@ def _detect_paychecks(conn):
             if exists:
                 continue
 
-            person = _identify_paycheck_person(desc_lower, float(txn["amount"]), members)
+            person = _identify_paycheck_person(conn, desc_lower, float(txn["amount"]), members)
             conn.execute(
                 """INSERT INTO paychecks (person, actual_amount, actual_date, notes)
                    VALUES (?,?,?,?)""",
@@ -330,11 +330,32 @@ def _detect_paychecks(conn):
             )
     conn.commit()
 
-def _identify_paycheck_person(desc_lower: str, amount: float, members: list) -> str:
+def _identify_paycheck_person(conn, desc_lower: str, amount: float, members: list) -> str:
     for m in members:
         if any(k in desc_lower for k in (m.get("payroll_keywords") or [])):
             return m["key"]
-    # Amount heuristic — each member's typical pay range from household settings
+    # Learned amounts: compare against each member's recent actual paychecks in
+    # the DB. Pay changes rarely (annual COLA), so recent history is the best
+    # amount signal and tracks raises automatically — unlike the static ranges
+    # below, which go stale and exist only as a cold-start hint for a member
+    # with no paycheck history yet.
+    best_key, best_diff = None, None
+    for m in members:
+        rows = conn.execute(
+            "SELECT actual_amount FROM paychecks WHERE person=? AND actual_amount IS NOT NULL "
+            "ORDER BY actual_date DESC LIMIT 6",
+            (m["key"],)
+        ).fetchall()
+        for r in rows:
+            prev = float(r["actual_amount"] or 0)
+            if prev <= 0:
+                continue
+            diff = abs(amount - prev) / prev
+            if best_diff is None or diff < best_diff:
+                best_key, best_diff = m["key"], diff
+    if best_key is not None and best_diff <= 0.15:
+        return best_key
+    # Cold-start fallback: static typical ranges from household settings
     for m in members:
         lo, hi = m.get("amount_min"), m.get("amount_max")
         if lo is None and hi is None:

@@ -844,8 +844,9 @@ async function connectSimplefin(e) {
       {/* Household members — drives paycheck detection and attribution */}
       <Section title="Household">
         <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 20 }}>
-          Who earns income in this household. The sync uses the payroll keywords (matched against bank
-          transaction descriptions) and the typical pay range to figure out whose paycheck a deposit is.
+          Who earns income in this household. The sync attributes a deposit by payroll keywords first,
+          then by comparing it to that person's recent actual paychecks already in the database.
+          The typical pay range is only a fallback for a new member with no paycheck history yet.
         </div>
         {household.map((m, i) => (
           <div key={m.key} style={{ marginBottom: 16, paddingBottom: 16, borderBottom: i < household.length - 1 ? '1px solid var(--border)' : 'none' }}>
