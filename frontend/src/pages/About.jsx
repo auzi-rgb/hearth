@@ -2,8 +2,12 @@
  * About.jsx — "How Hearth Works"
  *
  * A teaching page, not a report. It explains the same money flow every other
- * page already shows (paycheck -> bills/debt -> budget -> spending) as one
- * picture, using exactly the data those pages already read live.
+ * page already shows (paycheck -> bills/debt -> budget -> spending), viewable
+ * three ways (toggle, remembered per browser):
+ *   - System:    the household's actual two-account topology (paychecks ->
+ *                Bills account -> obligations off the top -> transfer -> Food)
+ *   - Flow:      Monarch-style Sankey — proportional ribbons from one paycheck
+ *   - Waterfall: income stepping down through bills/debt/savings to "to live on"
  *
  * ARCHITECTURAL PRINCIPLE: every number here is read from the same endpoints
  * and getters the rest of the app already uses — no hardcoded amounts, no
@@ -11,9 +15,9 @@
  * a bug in this file, not a reason to add a new backend route.
  *   - Income:        getMonthlyIncome() from lib/dashboardFields (same as Budget/Dashboard)
  *   - Bills/Debt:     GET /api/bills, split by payment_type, summed via monthly_equivalent
- *                      (same field Budget.jsx sums for its "Fixed Bills" total)
  *   - Budget:         GET /api/budgets (same data Budget.jsx's cards use)
  *   - Spending detail: GET /api/spending/transactions (same endpoint Spending.jsx uses)
+ *   - Accuracy strip: GET /api/bills/creep (drift) + GET /api/sync/log (freshness)
  */
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { getMonthlyIncome } from '../lib/dashboardFields'
@@ -36,6 +40,8 @@ function ribbonPath(x1, y0a, y1a, x2, y0b, y1b) {
   return `M${x1},${y0a} C${xm},${y0a} ${xm},${y0b} ${x2},${y0b} L${x2},${y1b} C${xm},${y1b} ${xm},${y1a} ${x1},${y1a} Z`
 }
 
+const COLORS = { bills: 'var(--red)', debt: 'var(--orange)', savings: 'var(--accent)', budget: 'var(--blue)', spending: 'var(--purple)' }
+
 function StatCard({ label, value, color }) {
   return (
     <div style={{ flex: '1 1 140px', minWidth: 130 }}>
@@ -49,27 +55,244 @@ function StatCard({ label, value, color }) {
   )
 }
 
+// ── View 1: Flow (Sankey) ─────────────────────────────────────────────────────
+function FlowView({ n, dim, setHovered, setZoomed }) {
+  const total = Math.max(n.income, 1)
+  const PLOT_H = 280
+  const scale = PLOT_H / total
+  const nodeW = 10
+  const gap = 14
+
+  const billsH = n.fixedBills * scale
+  const debtH = n.debtBills * scale
+  const savingsH = Math.max(n.savings * scale, 2)
+  const budgetH = n.available * scale
+
+  const yTop = 30
+  const billsY0 = yTop, billsY1 = billsY0 + billsH
+  const debtY0 = billsY1 + gap, debtY1 = debtY0 + debtH
+  const savingsY0 = debtY1 + gap, savingsY1 = savingsY0 + savingsH
+  const budgetY0 = savingsY1 + gap, budgetY1 = budgetY0 + budgetH
+
+  const paycheckX = 140
+  const destX = 480
+  const spendX = 760
+
+  const band = (key, d) => (
+    <path d={d} fill={`url(#grad-${key})`} stroke={COLORS[key]} strokeWidth="0.5"
+      opacity={dim(key) ? 0.25 : 1} style={{ cursor: 'pointer', transition: 'opacity 0.2s' }}
+      onMouseEnter={() => setHovered(key)} onMouseLeave={() => setHovered(null)} onClick={() => setZoomed(key)} />
+  )
+
+  return (
+    <svg viewBox="0 0 900 340" width="100%" style={{ overflow: 'visible', display: 'block' }}>
+      <defs>
+        {Object.entries(COLORS).map(([k, c]) => (
+          <linearGradient id={`grad-${k}`} key={k} x1="0" x2="1" y1="0" y2="0">
+            <stop offset="0%" stopColor={c} stopOpacity="0.55" />
+            <stop offset="100%" stopColor={c} stopOpacity="0.32" />
+          </linearGradient>
+        ))}
+      </defs>
+
+      {band('bills', ribbonPath(paycheckX + nodeW, billsY0, billsY1, destX, billsY0, billsY1))}
+      {band('debt', ribbonPath(paycheckX + nodeW, debtY0, debtY1, destX, debtY0, debtY1))}
+      {band('savings', ribbonPath(paycheckX + nodeW, savingsY0, savingsY1, destX, savingsY0, savingsY1))}
+      {band('budget', ribbonPath(paycheckX + nodeW, budgetY0, budgetY1, destX, budgetY0, budgetY1))}
+      {band('spending', ribbonPath(destX + nodeW, budgetY0, budgetY1, spendX, budgetY0, budgetY1))}
+
+      <rect x={paycheckX} y={yTop} width={nodeW} height={budgetY1 - yTop} rx="3" fill="var(--accent)" />
+      <rect x={destX} y={billsY0} width={nodeW} height={billsH} rx="3" fill={COLORS.bills} />
+      <rect x={destX} y={debtY0} width={nodeW} height={debtH} rx="3" fill={COLORS.debt} />
+      <rect x={destX} y={savingsY0} width={nodeW} height={savingsH} rx="3" fill={COLORS.savings} />
+      <rect x={destX} y={budgetY0} width={nodeW} height={budgetH} rx="3" fill={COLORS.budget} />
+      <rect x={spendX} y={budgetY0} width={nodeW} height={budgetH} rx="3" fill={COLORS.spending} />
+
+      <g fontSize="12.5" fontWeight="600" fill="var(--text-primary)">
+        <text x={paycheckX - 14} y={(yTop + budgetY1) / 2 - 6} textAnchor="end">Paycheck</text>
+        <text x={paycheckX - 14} y={(yTop + budgetY1) / 2 + 11} textAnchor="end" fontWeight="700" fontSize="13" fill="var(--accent-text)">{money(n.income)}/mo</text>
+
+        <text x={destX + nodeW + 12} y={(billsY0 + billsY1) / 2 - 6} textAnchor="start">Bills</text>
+        <text x={destX + nodeW + 12} y={(billsY0 + billsY1) / 2 + 11} textAnchor="start" fontWeight="700" fontSize="13" fill={COLORS.bills}>{money(n.fixedBills)}/mo</text>
+
+        <text x={destX + nodeW + 12} y={(debtY0 + debtY1) / 2 - 6} textAnchor="start">Debt</text>
+        <text x={destX + nodeW + 12} y={(debtY0 + debtY1) / 2 + 11} textAnchor="start" fontWeight="700" fontSize="13" fill={COLORS.debt}>{money(n.debtBills)}/mo</text>
+
+        <text x={destX + nodeW + 12} y={(savingsY0 + savingsY1) / 2 - 6} textAnchor="start">Savings</text>
+        <text x={destX + nodeW + 12} y={(savingsY0 + savingsY1) / 2 + 11} textAnchor="start" fontWeight="700" fontSize="13" fill={COLORS.savings}>{money(n.savings)}/mo</text>
+
+        <text x={destX - 12} y={(budgetY0 + budgetY1) / 2 - 6} textAnchor="end">Budget</text>
+        <text x={destX - 12} y={(budgetY0 + budgetY1) / 2 + 11} textAnchor="end" fontWeight="700" fontSize="13" fill={COLORS.budget}>{money(n.available)}/mo</text>
+
+        <text x={spendX + nodeW + 12} y={(budgetY0 + budgetY1) / 2 - 6} textAnchor="start">Spending</text>
+        <text x={spendX + nodeW + 12} y={(budgetY0 + budgetY1) / 2 + 11} textAnchor="start" fontWeight="700" fontSize="13" fill={COLORS.spending}>{money(n.spentSoFar)} so far</text>
+      </g>
+    </svg>
+  )
+}
+
+// ── View 2: Waterfall — income stepping down through the off-the-top items ──
+function WaterfallView({ n, dim, setHovered, setZoomed }) {
+  const total = Math.max(n.income, 1)
+  const PLOT_H = 240
+  const scale = PLOT_H / total
+  const base = 300
+  const top = base - PLOT_H
+  const barW = 120
+  const xs = { income: 40, bills: 212, debt: 384, savings: 556, budget: 728 }
+
+  const billsH = n.fixedBills * scale
+  const debtH = n.debtBills * scale
+  const savingsH = Math.max(n.savings * scale, 3)
+  const budgetH = Math.max(n.available * scale, 3)
+
+  const billsTop = top
+  const debtTop = top + billsH
+  const savingsTop = debtTop + debtH
+  const budgetTop = base - budgetH
+
+  const bar = (key, x, y, h, fill) => (
+    <rect x={x} y={y} width={barW} height={Math.max(h, 3)} rx="6" fill={fill}
+      opacity={dim(key) ? 0.25 : 0.85} style={{ cursor: key === 'income' ? 'default' : 'pointer', transition: 'opacity 0.2s' }}
+      onMouseEnter={() => key !== 'income' && setHovered(key)} onMouseLeave={() => setHovered(null)}
+      onClick={() => key !== 'income' && setZoomed(key)} />
+  )
+
+  const conn = (x1, x2, y) => (
+    <line x1={x1} y1={y} x2={x2} y2={y} stroke="var(--border)" strokeDasharray="3 3" />
+  )
+
+  return (
+    <svg viewBox="0 0 900 340" width="100%" style={{ overflow: 'visible', display: 'block' }}>
+      {conn(xs.income + barW, xs.bills + barW, top)}
+      {conn(xs.bills + barW, xs.debt + barW, debtTop)}
+      {conn(xs.debt + barW, xs.savings + barW, savingsTop)}
+      {conn(xs.savings + barW, xs.budget + barW, budgetTop)}
+
+      {bar('income', xs.income, top, PLOT_H, 'var(--accent)')}
+      {bar('bills', xs.bills, billsTop, billsH, COLORS.bills)}
+      {bar('debt', xs.debt, debtTop, debtH, COLORS.debt)}
+      {bar('savings', xs.savings, savingsTop, savingsH, COLORS.savings)}
+      {bar('budget', xs.budget, budgetTop, budgetH, COLORS.budget)}
+
+      <g fontSize="13" fontWeight="700" textAnchor="middle" fontVariantNumeric="tabular-nums">
+        <text x={xs.income + barW / 2} y={top - 10} fill="var(--accent-text)">{money(n.income)}</text>
+        <text x={xs.bills + barW / 2} y={billsTop - 10} fill={COLORS.bills}>−{money(n.fixedBills)}</text>
+        <text x={xs.debt + barW / 2} y={debtTop - 10} fill={COLORS.debt}>−{money(n.debtBills)}</text>
+        <text x={xs.savings + barW / 2} y={savingsTop - 10} fill="var(--accent-text)">−{money(n.savings)}</text>
+        <text x={xs.budget + barW / 2} y={budgetTop - 10} fill={COLORS.budget}>{money(n.available)}</text>
+      </g>
+      <g fontSize="12.5" fontWeight="600" textAnchor="middle" fill="var(--text-secondary)">
+        <text x={xs.income + barW / 2} y={base + 22}>Income</text>
+        <text x={xs.bills + barW / 2} y={base + 22}>Bills</text>
+        <text x={xs.debt + barW / 2} y={base + 22}>Debt</text>
+        <text x={xs.savings + barW / 2} y={base + 22}>Savings</text>
+        <text x={xs.budget + barW / 2} y={base + 22}>To live on</text>
+      </g>
+    </svg>
+  )
+}
+
+// ── View 3: System — the household's actual two-account money topology ──────
+function SystemView({ n, dash, dim, setHovered, setZoomed }) {
+  const total = Math.max(n.income, 1)
+  // Pipe widths proportional to dollars, clamped so nothing vanishes or bloats
+  const pw = v => Math.max(5, Math.min(34, (v / total) * 64))
+
+  const nextXferLabel = dash?.next_transfer_date
+    ? new Date(dash.next_transfer_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+    : null
+
+  const box = (key, x, y, w, h, color, title, line2, line3) => (
+    <g opacity={key && dim(key) ? 0.3 : 1} style={{ cursor: key ? 'pointer' : 'default', transition: 'opacity 0.2s' }}
+      onMouseEnter={() => key && setHovered(key)} onMouseLeave={() => setHovered(null)}
+      onClick={() => key && setZoomed(key)}>
+      <rect x={x} y={y} width={w} height={h} rx="12" fill={color} opacity="0.1" />
+      <rect x={x} y={y} width={w} height={h} rx="12" fill="none" stroke={color} strokeWidth="1.5" />
+      <text x={x + w / 2} y={y + (line3 ? 24 : line2 ? 27 : h / 2 + 5)} textAnchor="middle" fontSize="13.5" fontWeight="600" fill="var(--text-primary)">{title}</text>
+      {line2 && <text x={x + w / 2} y={y + (line3 ? 42 : 46)} textAnchor="middle" fontSize="12.5" fontWeight="700" fill={color} fontVariantNumeric="tabular-nums">{line2}</text>}
+      {line3 && <text x={x + w / 2} y={y + 60} textAnchor="middle" fontSize="11.5" fill="var(--text-secondary)" fontVariantNumeric="tabular-nums">{line3}</text>}
+    </g>
+  )
+
+  const pipe = (key, d, color, width) => (
+    <path d={d} stroke={color} strokeWidth={width} fill="none" opacity={key && dim(key) ? 0.15 : 0.45}
+      strokeLinecap="round" style={{ cursor: key ? 'pointer' : 'default', transition: 'opacity 0.2s' }}
+      onMouseEnter={() => key && setHovered(key)} onMouseLeave={() => setHovered(null)}
+      onClick={() => key && setZoomed(key)} />
+  )
+
+  return (
+    <svg viewBox="0 0 900 430" width="100%" style={{ overflow: 'visible', display: 'block' }}>
+      {pipe(null, 'M195,204 C 255,204 265,204 325,204', 'var(--accent)', pw(n.income))}
+      {pipe('bills', 'M520,180 C 615,180 615,72 700,72', COLORS.bills, pw(n.fixedBills))}
+      {pipe('debt', 'M520,222 C 615,222 615,162 700,162', COLORS.debt, pw(n.debtBills))}
+      {pipe('budget', 'M422,252 C 422,290 422,290 422,318', COLORS.spending, pw(n.available))}
+      {pipe('spending', 'M520,356 C 615,356 615,360 700,360', COLORS.budget, pw(Math.min(n.spentSoFar, n.available) || 1))}
+
+      {box(null, 35, 172, 160, 64, 'var(--accent)', 'Paychecks', `${money(n.income)}/mo`)}
+      {box(null, 325, 152, 195, 100, 'var(--blue)', 'Bills Account', dash?.bills_balance != null ? `${money(dash.bills_balance)} today` : '', 'every dollar lands here')}
+      {box('bills', 700, 42, 170, 60, COLORS.bills, 'Bills', `${money(n.fixedBills)}/mo`)}
+      {box('debt', 700, 132, 170, 60, COLORS.debt, 'Debt payoff', `${money(n.debtBills)}/mo`)}
+      {box('budget', 325, 318, 195, 76, 'var(--purple)', 'Food Account', dash?.food_balance != null ? `${money(dash.food_balance)} today` : '', 'everyday living')}
+      {box('spending', 700, 330, 170, 60, COLORS.budget, 'Spending', `${money(n.spentSoFar)} so far`)}
+
+      <g fontSize="11.5" fill="var(--text-secondary)">
+        <text x="448" y="278">transfer the surplus</text>
+        <text x="448" y="294" fill="var(--text-tertiary)">
+          {money(n.available)}/mo{nextXferLabel ? ` · next ${nextXferLabel}` : ''}
+        </text>
+      </g>
+      {dash?.food_daily_allowance != null && (
+        <text x="785" y="410" fontSize="11.5" textAnchor="middle" fill="var(--text-tertiary)">
+          runway {money(dash.food_daily_allowance)}/day until transfer
+        </text>
+      )}
+    </svg>
+  )
+}
+
+const VIEWS = [
+  { id: 'system', label: 'Your System' },
+  { id: 'flow', label: 'Flow' },
+  { id: 'waterfall', label: 'Waterfall' },
+]
+const VIEW_SUBTITLES = {
+  system: 'How money actually moves through your two accounts. Click any box to see what’s in it.',
+  flow: 'One paycheck, proportional destinations. Click any band to see what’s actually in it.',
+  waterfall: 'Bills and debt come off the top — what’s left is what you live on. Click any bar.',
+}
+
 export default function About({ active, navigate }) {
   const [dash, setDash] = useState(null)
   const [bills, setBills] = useState([])
   const [budgets, setBudgets] = useState([])
   const [txns, setTxns] = useState([])
+  const [creep, setCreep] = useState(null)
+  const [lastSync, setLastSync] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [zoomed, setZoomed] = useState(null) // 'bills' | 'debt' | 'budget' | 'spending' | null
+  const [zoomed, setZoomed] = useState(null) // 'bills' | 'debt' | 'savings' | 'budget' | 'spending' | null
   const [hovered, setHovered] = useState(null)
+  const [view, setView] = useState(() => localStorage.getItem('hearth_about_view') || 'system')
+
+  function pickView(v) { setView(v); localStorage.setItem('hearth_about_view', v) }
 
   const load = useCallback(async () => {
     try {
-      const [d, b, bg, t] = await Promise.all([
+      const [d, b, bg, t, c, sl] = await Promise.all([
         fetch(`${API}/dashboard`).then(r => r.json()),
         fetch(`${API}/bills`).then(r => r.json()),
         fetch(`${API}/budgets`).then(r => r.json()),
         fetch(`${API}/spending/transactions?days=30`).then(r => r.json()),
+        fetch(`${API}/bills/creep`).then(r => r.json()).catch(() => null),
+        fetch(`${API}/sync/log`).then(r => r.json()).catch(() => []),
       ])
       setDash(d)
       setBills(Array.isArray(b) ? b : [])
       setBudgets(Array.isArray(bg) ? bg : [])
       setTxns(Array.isArray(t) ? t : [])
+      setCreep(c)
+      setLastSync(Array.isArray(sl) && sl[0]?.synced_at ? sl[0].synced_at : null)
     } catch { /* page still renders with zeros */ }
     setLoading(false)
   }, [])
@@ -98,41 +321,40 @@ export default function About({ active, navigate }) {
   const budgetRows = useMemo(() => [...budgets].sort((a, b) => (b.spent || 0) - (a.spent || 0)), [budgets])
   const topTxns = useMemo(() => [...txns].sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount)).slice(0, 8), [txns])
 
-  // ── Sankey geometry ──────────────────────────────────────────────────────
-  // Vertical scale: total income maps to a fixed pixel height. Three segments
-  // stack on the paycheck bar in the same order they branch out to the right.
-  const total = Math.max(income, 1)
-  const PLOT_H = 280
-  const scale = PLOT_H / total
-  const nodeW = 10
-  const gap = 14 // visual breathing room between stacked segments on the source bar
-
-  const billsH = fixedBills * scale
-  const debtH = debtBills * scale
-  const savingsH = savings * scale
-  const budgetH = available * scale
-
-  const yTop = 30
-  const billsY0 = yTop, billsY1 = billsY0 + billsH
-  const debtY0 = billsY1 + gap, debtY1 = debtY0 + debtH
-  const savingsY0 = debtY1 + gap, savingsY1 = savingsY0 + savingsH
-  const budgetY0 = savingsY1 + gap, budgetY1 = budgetY0 + budgetH
-
-  const paycheckX = 140
-  const destX = 480
-  const spendX = 760
-
-  const colors = { bills: 'var(--red)', debt: 'var(--orange)', savings: 'var(--accent)', budget: 'var(--blue)', spending: 'var(--purple)' }
   const dim = (key) => (hovered && hovered !== key) || (zoomed && zoomed !== key)
 
   if (!active) return null
 
+  const n = { income, fixedBills, debtBills, savings, available, spentSoFar }
+  const drifting = creep?.drifting?.length || 0
+  const lastSyncLabel = lastSync
+    ? new Date(lastSync).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+    : null
+
   return (
     <div style={{ padding: 28, maxWidth: 1020, margin: '0 auto', width: '100%' }}>
-      <div style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em' }}>How Hearth works</div>
-        <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 4 }}>
-          One paycheck, three destinations. Click any band to see what's actually in it.
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', flexWrap: 'wrap', gap: 12, marginBottom: 20 }}>
+        <div>
+          <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em' }}>How Hearth works</div>
+          <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 4 }}>
+            {VIEW_SUBTITLES[view]}
+          </div>
+        </div>
+        {/* View switcher */}
+        <div style={{ display: 'flex', background: 'var(--bg-subtle)', borderRadius: 9, padding: 3, gap: 2 }}>
+          {VIEWS.map(v => (
+            <button key={v.id} onClick={() => pickView(v.id)}
+              style={{
+                fontSize: 12, fontWeight: view === v.id ? 600 : 400, fontFamily: 'inherit',
+                padding: '5px 12px', borderRadius: 7, border: 'none', cursor: 'pointer',
+                background: view === v.id ? 'var(--bg-card)' : 'transparent',
+                color: view === v.id ? 'var(--text-primary)' : 'var(--text-secondary)',
+                boxShadow: view === v.id ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
+                transition: 'all 0.15s',
+              }}>
+              {v.label}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -155,67 +377,9 @@ export default function About({ active, navigate }) {
             <div style={{ padding: 60, textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 13 }}>Loading your numbers…</div>
           ) : (
             <div className="apple-card" style={{ padding: '32px 36px 24px' }}>
-              <svg viewBox="0 0 900 340" width="100%" style={{ overflow: 'visible', display: 'block' }}>
-                <defs>
-                  {Object.entries(colors).map(([k, c]) => (
-                    <linearGradient id={`grad-${k}`} key={k} x1="0" x2="1" y1="0" y2="0">
-                      <stop offset="0%" stopColor={c} stopOpacity="0.55" />
-                      <stop offset="100%" stopColor={c} stopOpacity="0.32" />
-                    </linearGradient>
-                  ))}
-                </defs>
-
-                {/* ── Ribbons (drawn first, under the node bars) ── */}
-                <path d={ribbonPath(paycheckX + nodeW, billsY0, billsY1, destX, billsY0, billsY1)}
-                  fill="url(#grad-bills)" stroke={colors.bills} strokeWidth="0.5"
-                  opacity={dim('bills') ? 0.25 : 1} style={{ cursor: 'pointer', transition: 'opacity 0.2s' }}
-                  onMouseEnter={() => setHovered('bills')} onMouseLeave={() => setHovered(null)} onClick={() => setZoomed('bills')} />
-                <path d={ribbonPath(paycheckX + nodeW, debtY0, debtY1, destX, debtY0, debtY1)}
-                  fill="url(#grad-debt)" stroke={colors.debt} strokeWidth="0.5"
-                  opacity={dim('debt') ? 0.25 : 1} style={{ cursor: 'pointer', transition: 'opacity 0.2s' }}
-                  onMouseEnter={() => setHovered('debt')} onMouseLeave={() => setHovered(null)} onClick={() => setZoomed('debt')} />
-                <path d={ribbonPath(paycheckX + nodeW, savingsY0, savingsY1, destX, savingsY0, savingsY1)}
-                  fill="url(#grad-savings)" stroke={colors.savings} strokeWidth="0.5"
-                  opacity={dim('savings') ? 0.25 : 1} style={{ cursor: 'pointer', transition: 'opacity 0.2s' }}
-                  onMouseEnter={() => setHovered('savings')} onMouseLeave={() => setHovered(null)} onClick={() => setZoomed('savings')} />
-                <path d={ribbonPath(paycheckX + nodeW, budgetY0, budgetY1, destX, budgetY0, budgetY1)}
-                  fill="url(#grad-budget)" stroke={colors.budget} strokeWidth="0.5"
-                  opacity={dim('budget') ? 0.25 : 1} style={{ cursor: 'pointer', transition: 'opacity 0.2s' }}
-                  onMouseEnter={() => setHovered('budget')} onMouseLeave={() => setHovered(null)} onClick={() => setZoomed('budget')} />
-                <path d={ribbonPath(destX + nodeW, budgetY0, budgetY1, spendX, budgetY0, budgetY1)}
-                  fill="url(#grad-spending)" stroke={colors.spending} strokeWidth="0.5"
-                  opacity={dim('spending') ? 0.25 : 1} style={{ cursor: 'pointer', transition: 'opacity 0.2s' }}
-                  onMouseEnter={() => setHovered('spending')} onMouseLeave={() => setHovered(null)} onClick={() => setZoomed('spending')} />
-
-                {/* ── Node bars ── */}
-                <rect x={paycheckX} y={yTop} width={nodeW} height={budgetY1 - yTop} rx="3" fill="var(--accent)" />
-                <rect x={destX} y={billsY0} width={nodeW} height={billsH} rx="3" fill={colors.bills} />
-                <rect x={destX} y={debtY0} width={nodeW} height={debtH} rx="3" fill={colors.debt} />
-                <rect x={destX} y={savingsY0} width={nodeW} height={savingsH} rx="3" fill={colors.savings} />
-                <rect x={destX} y={budgetY0} width={nodeW} height={budgetH} rx="3" fill={colors.budget} />
-                <rect x={spendX} y={budgetY0} width={nodeW} height={budgetH} rx="3" fill={colors.spending} />
-
-                {/* ── Labels ── */}
-                <g fontSize="12.5" fontWeight="600" fill="var(--text-primary)">
-                  <text x={paycheckX - 14} y={(yTop + budgetY1) / 2 - 6} textAnchor="end">Paycheck</text>
-                  <text x={paycheckX - 14} y={(yTop + budgetY1) / 2 + 11} textAnchor="end" fontWeight="700" fontSize="13" fill="var(--accent-text)">{money(income)}/mo</text>
-
-                  <text x={destX + nodeW + 12} y={(billsY0 + billsY1) / 2 - 6} textAnchor="start">Bills</text>
-                  <text x={destX + nodeW + 12} y={(billsY0 + billsY1) / 2 + 11} textAnchor="start" fontWeight="700" fontSize="13" fill={colors.bills}>{money(fixedBills)}/mo</text>
-
-                  <text x={destX + nodeW + 12} y={(debtY0 + debtY1) / 2 - 6} textAnchor="start">Debt</text>
-                  <text x={destX + nodeW + 12} y={(debtY0 + debtY1) / 2 + 11} textAnchor="start" fontWeight="700" fontSize="13" fill={colors.debt}>{money(debtBills)}/mo</text>
-
-                  <text x={destX + nodeW + 12} y={(savingsY0 + savingsY1) / 2 - 6} textAnchor="start">Savings</text>
-                  <text x={destX + nodeW + 12} y={(savingsY0 + savingsY1) / 2 + 11} textAnchor="start" fontWeight="700" fontSize="13" fill={colors.savings}>{money(savings)}/mo</text>
-
-                  <text x={destX - 12} y={(budgetY0 + budgetY1) / 2 - 6} textAnchor="end">Budget</text>
-                  <text x={destX - 12} y={(budgetY0 + budgetY1) / 2 + 11} textAnchor="end" fontWeight="700" fontSize="13" fill={colors.budget}>{money(available)}/mo</text>
-
-                  <text x={spendX + nodeW + 12} y={(budgetY0 + budgetY1) / 2 - 6} textAnchor="start">Spending</text>
-                  <text x={spendX + nodeW + 12} y={(budgetY0 + budgetY1) / 2 + 11} textAnchor="start" fontWeight="700" fontSize="13" fill={colors.spending}>{money(spentSoFar)} so far</text>
-                </g>
-              </svg>
+              {view === 'flow' && <FlowView n={n} dim={dim} setHovered={setHovered} setZoomed={setZoomed} />}
+              {view === 'waterfall' && <WaterfallView n={n} dim={dim} setHovered={setHovered} setZoomed={setZoomed} />}
+              {view === 'system' && <SystemView n={n} dash={dash} dim={dim} setHovered={setHovered} setZoomed={setZoomed} />}
             </div>
           )}
 
@@ -227,6 +391,31 @@ export default function About({ active, navigate }) {
               <strong style={{ color: 'var(--orange)' }}>{money(debtBills)}</strong> by debt before you ever see it —
               another <strong style={{ color: 'var(--accent-text)' }}>{money(savings)}</strong> goes to savings —
               leaving <strong style={{ color: 'var(--blue)' }}>{money(available)}</strong> to actually budget and spend.
+            </div>
+          )}
+
+          {/* Accuracy strip — this picture is only as honest as the Bills list */}
+          {!loading && (
+            <div style={{
+              marginTop: 14, display: 'flex', alignItems: 'center', justifyContent: 'center',
+              flexWrap: 'wrap', gap: 6, fontSize: 12, color: 'var(--text-tertiary)',
+            }}>
+              <span>Built live from <strong style={{ color: 'var(--text-secondary)' }}>{bills.length} tracked bills</strong></span>
+              {drifting > 0 && (
+                <>
+                  <span>·</span>
+                  <span style={{ color: 'var(--orange, #FF9500)', fontWeight: 600 }}>
+                    {drifting} costing more than expected
+                  </span>
+                </>
+              )}
+              {lastSyncLabel && <><span>·</span><span>last sync {lastSyncLabel}</span></>}
+              <span>·</span>
+              <button onClick={() => navigate?.('bills')}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+                  fontSize: 12, color: 'var(--blue)', fontFamily: 'inherit' }}>
+                review bills →
+              </button>
             </div>
           )}
         </div>
@@ -263,7 +452,7 @@ export default function About({ active, navigate }) {
                 title={`Savings — ${money(savings)}/mo goal`}
                 sub="Your savings target, set on the Budget tab — not a transaction category, so it never shows real spending."
                 rows={savings > 0 ? [["Savings goal", money(savings), "monthly target"]] : []}
-                emptyText="No savings goal set yet."
+                emptyText="No savings goal set yet — this band grows the day the debt band hits zero."
                 onJump={() => navigate?.('budget')}
                 jumpLabel="Go to Budget →"
               />
