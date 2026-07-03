@@ -1,0 +1,334 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Non-layered: beats all @layer rules including Tailwind utilities */
+html, body, #root {
+  height: 100% !important;
+  overflow: hidden !important;
+  margin: 0;
+  padding: 0;
+}
+
+@layer base {
+  :root {
+    --bg: #f5f5f7;
+    --bg-card: rgba(255, 255, 255, 0.85);
+    --bg-card-hover: rgba(255, 255, 255, 0.95);
+    --bg-subtle: rgba(0, 0, 0, 0.04);
+    --bg-nav: rgba(245, 245, 247, 0.85);
+    --bg-drawer: #e8e8ea;
+    --bg-modal: #ffffff;
+    --text-primary: #1d1d1f;
+    --text-secondary: #6e6e73;
+    --text-tertiary: #aeaeb2;
+    --border: rgba(0, 0, 0, 0.08);
+    --border-strong: rgba(0, 0, 0, 0.15);
+    --shadow-card: 0 2px 20px rgba(0,0,0,0.08), 0 0 0 0.5px rgba(0,0,0,0.06);
+    --shadow-card-hover: 0 4px 30px rgba(0,0,0,0.12), 0 0 0 0.5px rgba(0,0,0,0.08);
+    --shadow-nav: 0 1px 0 rgba(0,0,0,0.08);
+    --accent: #34c759;
+    --accent-dim: rgba(52, 199, 89, 0.15);
+    --accent-text: #1a7a35;
+    --red: #ff3b30;
+    --orange: #ff9500;
+    --blue: #007aff;
+    --purple: #af52de;
+    --radius: 16px;
+    --radius-sm: 10px;
+    --radius-pill: 100px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #000000;
+      --bg-card: rgba(28, 28, 30, 0.85);
+      --bg-card-hover: rgba(38, 38, 40, 0.95);
+      --bg-subtle: rgba(255, 255, 255, 0.06);
+      --bg-nav: rgba(0, 0, 0, 0.85);
+      --bg-drawer: #1a1a1c;
+      --bg-modal: #1c1c1e;
+      --text-primary: #f5f5f7;
+      --text-secondary: #98989d;
+      --text-tertiary: #636366;
+      --border: rgba(255, 255, 255, 0.1);
+      --border-strong: rgba(255, 255, 255, 0.15);
+      --shadow-card: 0 2px 20px rgba(0,0,0,0.4), 0 0 0 0.5px rgba(255,255,255,0.06);
+      --shadow-card-hover: 0 4px 30px rgba(0,0,0,0.5), 0 0 0 0.5px rgba(255,255,255,0.08);
+      --shadow-nav: 0 1px 0 rgba(255,255,255,0.06);
+      --accent: #34c759;
+      --accent-dim: rgba(52, 199, 89, 0.15);
+      --accent-text: #34c759;
+      --red: #ff453a;
+      --orange: #ff9f0a;
+      --blue: #0a84ff;
+      --purple: #bf5af2;
+    }
+  }
+
+  * { -webkit-font-smoothing: antialiased; }
+
+  body {
+    background: var(--bg);
+    color: var(--text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display",
+                 "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.47059;
+    letter-spacing: -0.022em;
+    transition: background 0.3s ease;
+  }
+}
+
+@layer components {
+  .apple-card {
+    background: var(--bg-card);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-card);
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
+  }
+  .apple-card-clickable {
+    cursor: pointer;
+  }
+  .apple-card-clickable:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-card-hover);
+  }
+
+  .apple-btn-primary {
+    background: var(--accent);
+    color: #fff;
+    font-size: 14px;
+    font-weight: 500;
+    padding: 8px 18px;
+    border-radius: var(--radius-pill);
+    border: none;
+    cursor: pointer;
+    transition: opacity 0.15s ease, transform 0.15s ease;
+    letter-spacing: -0.01em;
+    font-family: inherit;
+  }
+  .apple-btn-primary:hover { opacity: 0.85; transform: scale(0.99); }
+  .apple-btn-primary:active { transform: scale(0.97); }
+  .apple-btn-primary:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+  .apple-btn-secondary {
+    background: var(--bg-subtle);
+    color: var(--text-primary);
+    font-size: 14px;
+    font-weight: 500;
+    padding: 8px 18px;
+    border-radius: var(--radius-pill);
+    border: none;
+    cursor: pointer;
+    transition: background 0.15s ease;
+    letter-spacing: -0.01em;
+    font-family: inherit;
+  }
+  .apple-btn-secondary:hover { background: var(--border); }
+
+  .apple-btn-danger {
+    background: rgba(255, 59, 48, 0.1);
+    color: var(--red);
+    font-size: 13px;
+    font-weight: 500;
+    padding: 6px 14px;
+    border-radius: var(--radius-pill);
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .apple-btn-danger:hover { background: rgba(255, 59, 48, 0.2); }
+
+  .apple-input {
+    background: var(--bg-subtle);
+    color: var(--text-primary);
+    border: 1.5px solid transparent;
+    border-radius: var(--radius-sm);
+    padding: 9px 13px;
+    font-size: 14px;
+    font-family: inherit;
+    width: 100%;
+    outline: none;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  .apple-input:focus { border-color: var(--accent); background: var(--bg-card); }
+  .apple-input::placeholder { color: var(--text-tertiary); }
+
+  .apple-select {
+    background: var(--bg-subtle);
+    color: var(--text-primary);
+    border: 1.5px solid transparent;
+    border-radius: var(--radius-sm);
+    padding: 9px 13px;
+    font-size: 14px;
+    font-family: inherit;
+    outline: none;
+    cursor: pointer;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23999' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    padding-right: 32px;
+  }
+
+  .apple-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+  }
+
+  .apple-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: var(--radius-pill);
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .apple-pill-green  { background: var(--accent-dim); color: var(--accent-text); }
+  .apple-pill-red    { background: rgba(255, 59, 48, 0.12); color: var(--red); }
+  .apple-pill-orange { background: rgba(255, 149, 0, 0.15); color: var(--orange); }
+  .apple-pill-blue   { background: rgba(0, 122, 255, 0.12); color: var(--blue); }
+  .apple-pill-neutral{ background: var(--bg-subtle); color: var(--text-secondary); }
+
+  .apple-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .apple-dot-green  { background: var(--accent); }
+  .apple-dot-red    { background: var(--red); }
+  .apple-dot-orange { background: var(--orange); }
+  .apple-dot-gray   { background: var(--text-tertiary); }
+
+  .apple-divider { height: 1px; background: var(--border); border: none; margin: 0; }
+
+  .page-enter {
+    animation: page-in 0.25s ease forwards;
+  }
+  @keyframes page-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .money-positive { color: var(--accent-text); }
+  .money-negative { color: var(--red); }
+  .money-neutral  { color: var(--text-primary); }
+
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+  }
+/* ── Hamburger / drawer / overlay: desktop-only hide ── */
+@media (min-width: 769px) {
+  .mobile-hamburger { display: none !important; }
+  .mobile-drawer    { display: none !important; }
+  .drawer-overlay   { display: none !important; }
+}
+
+/* Default hidden so desktop never flashes hamburger */
+.mobile-hamburger { display: none; }
+
+/* ── Mobile layout ──────────────────────────────────── */
+@media (max-width: 768px) {
+  body { overflow-x: hidden; }
+
+  /* Shell */
+  .app-shell    { width: 100% !important; max-width: 100vw !important; }
+  .desktop-sidebar { display: none !important; }
+  .content-shell {
+    width: 100% !important;
+    max-width: 100vw !important;
+    height: 100vh !important;
+  }
+  .top-title-strip { padding: 0 16px !important; }
+
+  /* Page padding — override the 32px 36px used on every page */
+  .page-enter {
+    padding-left: 14px !important;
+    padding-right: 14px !important;
+    padding-top: 20px !important;
+  }
+
+  /* Cards never wider than screen */
+  .apple-card { box-sizing: border-box; max-width: 100%; }
+
+  /* ── Touch targets ── */
+  /* Buttons / inputs default min-height 44px to meet tap target guidelines */
+  .apple-btn-primary,
+  .apple-btn-secondary,
+  .apple-btn-danger { min-height: 44px; }
+
+  /* Transaction rows — ensure 48px tap height */
+  .txn-row { min-height: 48px; }
+
+  /* ── Typography scaling ── */
+  h1 { font-size: clamp(26px, 7vw, 36px) !important; }
+
+  /* Raise tiny text to 13px minimum */
+  .apple-label { font-size: 12px !important; }
+
+  /* ── Calendar — stack layout vertically on mobile ── */
+  .calendar-main-area { flex-direction: column !important; }
+  .calendar-sidebar {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-height: 280px;
+    flex-shrink: 0;
+  }
+
+  /* ── Spending donut+legend — stack vertically ── */
+  .donut-legend-row { flex-direction: column !important; align-items: stretch !important; }
+  .donut-legend-row .donut-chart-wrap { align-self: center; }
+
+  /* ── Charts — horizontal scroll instead of squish ── */
+  .chart-scroll-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .chart-scroll-inner { min-width: 400px; }
+
+  /* ── Hamburger button ── */
+  .mobile-hamburger {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 20px;
+    color: var(--text-primary);
+    padding: 0 4px;
+    line-height: 1;
+    min-height: 44px;
+    min-width: 44px;
+    flex-shrink: 0;
+    border-radius: var(--radius-sm);
+  }
+  .mobile-hamburger:active { background: var(--bg-subtle); }
+
+  /* ── Drawer backdrop overlay ── */
+  .drawer-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    z-index: 9998;
+    transition: opacity 0.22s ease;
+  }
+
+  /* ── Slide-in nav drawer ── */
+  .mobile-drawer {
+    position: fixed;
+    top: 0; left: 0; bottom: 0;
+    width: 75vw;
+    max-width: 300px;
+    background: var(--bg-drawer);
+    border-right: 1px solid var(--border);
+    z-index: 9999;
+    transition: transform 0.22s ease;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+}
+}
