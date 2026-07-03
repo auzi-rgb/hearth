@@ -397,9 +397,17 @@ def _coach_context(conn) -> dict:
             ).fetchone()
         return {"name": row["nickname"] or row["name"], "balance": round(float(row["current_balance"] or 0), 2)} if row else None
 
+    # Paid status comes from the same bill_paid_months table the Calendar and
+    # Bills checkmarks write to — a bill the household already marked paid must
+    # never be coached about as if it were still due.
+    paid_lookup = {
+        (r["bill_id"], r["month"])
+        for r in conn.execute("SELECT bill_id, month FROM bill_paid_months").fetchall()
+    }
     bills_next_7 = []
+    next_unpaid = None
     for b in conn.execute(
-        "SELECT name, expected_amount, day_of_month, frequency, day_of_week FROM bills WHERE is_active=1"
+        "SELECT id, name, expected_amount, day_of_month, frequency, day_of_week FROM bills WHERE is_active=1"
     ).fetchall():
         if b["frequency"] == "weekly" and b["day_of_week"] is not None:
             due = today + timedelta(days=(b["day_of_week"] - today.weekday()) % 7)
@@ -416,8 +424,15 @@ def _coach_context(conn) -> dict:
                     continue
         else:
             continue
+        # Weekly bills recur several times a month under one paid mark, so only
+        # monthly bills are filtered by paid status (same rule as the dashboard).
+        if b["frequency"] != "weekly" and (b["id"], due.strftime("%Y-%m")) in paid_lookup:
+            continue
+        entry = {"name": b["name"], "amount": round(float(b["expected_amount"]), 2), "due": due.isoformat()}
         if (due - today).days <= 7:
-            bills_next_7.append({"name": b["name"], "amount": round(float(b["expected_amount"]), 2), "due": due.isoformat()})
+            bills_next_7.append(entry)
+        if next_unpaid is None or due.isoformat() < next_unpaid["due"]:
+            next_unpaid = entry
 
     debt_total = sum(
         abs(float(a["current_balance"] or 0))
@@ -446,7 +461,8 @@ def _coach_context(conn) -> dict:
         "date": today.isoformat(),
         "bills_account": role_account("bills", "bills"),
         "food_account": role_account("food", "food"),
-        "bills_due_next_7_days": sorted(bills_next_7, key=lambda x: x["due"]),
+        "unpaid_bills_due_next_7_days": sorted(bills_next_7, key=lambda x: x["due"]),
+        "next_unpaid_bill": next_unpaid,
         "total_debt": round(debt_total, 2),
         "discretionary_spent_month_to_date": round(mtd, 2),
         "discretionary_same_period_last_month": round(last_mtd, 2),
@@ -474,7 +490,8 @@ Write a short morning briefing — 4 to 6 sentences of plain language, no header
 - End with one concrete, encouraging next action.
 
 Field meanings (be precise about these):
-- bills_due_next_7_days: bills due over the COMING WEEK. A bill is only "due today" if its due date equals today's date.
+- unpaid_bills_due_next_7_days: bills due over the COMING WEEK that are NOT yet paid. Bills already paid are excluded — never mention them as due. If this list is empty, say so: it means nothing needs paying this week.
+- next_unpaid_bill: the next bill that still needs to be paid, however far out. Use it to say when the next obligation actually arrives.
 - discretionary_spent_month_to_date: spent so far THIS month.
 - discretionary_same_period_last_month: spent over the SAME NUMBER OF DAYS at the start of LAST MONTH (a month-over-month comparison — never say "last year").
 
