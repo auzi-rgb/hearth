@@ -204,6 +204,30 @@ Day-by-day simulation of bills out / paychecks in over 60 days; `safe_today` = l
 
 ---
 
+## Session 8 features (2026-07-03)
+
+**The app's purpose** (per the household): live month to month, not paycheck to paycheck. All income lands in the Bills account; bills + debt come off the top; surplus transfers to Food for daily living. Goal order: spend < earn → pay off debt → then savings/retirement.
+
+- **Transfer workflow**: `transfers` table; `GET/POST/DELETE /api/transfers`; Dashboard "Record transfer" button + last-transfer line; schedule configurable via `transfer_schedule` setting (JSON `{"mode":"days","days":[1,15]}` or `{"mode":"payday"}`), edited inline (✎ next to "Next transfer"). Dashboard payload: `next_transfer_date` (ISO), `last_transfer`.
+- **Debt countdown**: dashboard payload `debt_total`, `debt_free_date/months` (avalanche sim via shared `_collect_debts`), `debt_change_month` (vs last net-worth snapshot before month start), `debt_focus`. Clickable strip on Dashboard → Debt tab.
+- **Food runway**: `food_daily_allowance` (balance ÷ days to next transfer) vs `food_daily_pace` (14-day actual) in Spending Power card; red when over pace.
+- **Bill creep**: `GET /api/bills/creep` — `drifting` (latest actual > expected +5%, matched by name[:8]) + `annual` ranking. Banner + collapsible annual view on Bills page.
+- **Month in Review**: `monthly_reports` table; `compute_month_review` (income − obligations − discretionary = surplus; debt/net-worth change from snapshots); `GET /api/reports`, `POST /api/reports/generate`; auto-generated on the 1st at 4:00am; card on Overview.
+- **Nightly AI coach**: `ai_briefings` table; sync.py `generate_coach_briefing()` at 3:45am — Python computes all numbers (`_coach_context`), model only phrases them (guardrail: never recalculate; explicit field-meaning notes because small models garble labels). Settings: `ai_coach_enabled` (default true), `ai_coach_model` (default qwen2.5:14b — the best model, fine overnight). `GET /api/ai/briefing`, `POST /api/ai/briefing/generate`. Collapsible "Morning Briefing" card on Dashboard.
+
+## Tunable constants (in code, deliberately not in UI)
+
+Settings-backed (editable in UI): `paycheck_min_amount` (default 500, Settings → Household), `transfer_detection_phrases` (USAA defaults, Settings → Connections), `transfer_schedule`, `safe_spend_buffer`, `ai_coach_model`.
+
+Code-only (change requires an edit here + main.py/sync.py):
+- Paycheck attribution: 15% tolerance vs last 6 actuals; expected amount = mean of last 5 with >40%-from-median outliers dropped; payday-match window ±3 days; detection window 60 days; payday DOW fallback ±1 day
+- Cash-flow simulation lookahead 60 days; upcoming bills capped at 10; paycheck variance badge at >5%
+- Debt: estimated min payment max($25, 2% of balance); progress floor interest + 1% of balance; sim cap 600 months; payoff dates use 30-day months
+- Bills↔transactions matching: `description LIKE %name[:8]%` (rename a bill → history/creep/rolling stats break); rolling min/max = last 3 txns in 90 days; creep drift threshold +5% over 120 days
+- sync.py: `CATEGORY_KEYWORDS` (keyword→category brain), `_map_account_type` keywords, `_SKIP_KEYWORDS`, SimpleFin window 90 days, fuzzy dedup ±1 day (known data-loss issue below)
+- Schedule: sync 2:00am, net-worth 3:00am, backup 3:30am (keep 14), coach 3:45am, monthly report 1st 4:00am
+- Infra: `GATEWAY_URL` hardcoded in main.py and sync.py; JWT expiry 8h; AI num_ctx 8192 (chat) / 4096 (coach)
+
 ## Known Issues (from Session 6 QC review — not yet fixed)
 
 1. **Sync fuzzy dedup can drop real transactions** — same account + amount within 1 day with different descriptions is treated as a duplicate (sync.py). Two distinct same-priced purchases on the same day → second one never imported.
@@ -233,3 +257,4 @@ Day-by-day simulation of bills out / paychecks in over 60 days; `safe_today` = l
 | 5 | 2026-06-14 | Bills.jsx rewrite, Overview Loans/TMRS UI, deploy path fix |
 | 6 | 2026-07-03 | QC review: git repo + .gitignore, pinned requirements.txt, nightly DB backups, nickname/display_name migrations, configurable household (Settings → Household), explicit Bills/Food account roles, payroll detection tied to configured paydays, this file audited & rewritten |
 | 7 | 2026-07-03 | UX root-cause pass: retired the Gen-1 low-balance threshold banner (message displayed a different number than it tested; simulation `overdraft_warnings` is the only warning now), Settings rebuilt as hub + sub-pages with clickable breadcrumbs, setup-vs-use IA (roles/CSV → Accounts, rules → Spending, memory → Assistant, buffer inline on Dashboard), paycheck attribution learns from recent actual amounts in DB |
+| 8 | 2026-07-03 | Goal-oriented features: transfer workflow (record + configurable schedule), Dashboard debt countdown + food runway, bill-creep watchdog + annual cost view, Month in Review reports, nightly AI coach briefing (qwen2.5:14b overnight via gateway, verified live), paycheck floor + transfer phrases exposed in Settings, tunable-constants section added to this doc |

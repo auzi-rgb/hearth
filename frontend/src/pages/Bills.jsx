@@ -308,9 +308,12 @@ export default function Bills({ active }) {
   const [deleteId, setDeleteId] = useState(null)
   const [deleting, setDeleting] = useState(false)
   const [editBill, setEditBill] = useState(undefined) // undefined=closed, null=new, obj=edit
+  const [creep, setCreep] = useState(null)
+  const [showAnnual, setShowAnnual] = useState(false)
 
   const load = useCallback(() => {
     fetch(`${API}/bills`).then(r => r.json()).then(setBills).catch(() => {})
+    fetch(`${API}/bills/creep`).then(r => r.json()).then(setCreep).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -396,8 +399,60 @@ export default function Bills({ active }) {
               {bills.length}
             </div>
           </div>
+          {creep?.annual_total > 0 && (
+            <div style={{ cursor: 'pointer' }} onClick={() => setShowAnnual(s => !s)} title="Click for the per-bill annual breakdown">
+              <div className="apple-label" style={{ marginBottom: 2 }}>Per Year {showAnnual ? '▴' : '▾'}</div>
+              <div style={{ fontSize: 15, fontWeight: 700, fontVariantNumeric: 'tabular-nums', color: 'var(--text-primary)' }}>
+                {money(creep.annual_total)}
+              </div>
+            </div>
+          )}
         </div>
       </div>
+
+      {/* Bill creep — recent payments drifting above the expected amount */}
+      {creep?.drifting?.length > 0 && (
+        <div style={{
+          background: 'rgba(255,149,0,0.08)', border: '1px solid rgba(255,149,0,0.3)',
+          borderRadius: 12, padding: '14px 18px', marginBottom: 16,
+        }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--orange, #FF9500)', marginBottom: 8 }}>
+            ⚠ {creep.drifting.length} bill{creep.drifting.length !== 1 ? 's' : ''} costing more than expected
+          </div>
+          {creep.drifting.map(d => (
+            <div key={d.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+              fontSize: 13, padding: '4px 0', gap: 10 }}>
+              <span style={{ fontWeight: 500 }}>{d.name}</span>
+              <span style={{ fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
+                expected {money(d.expected)} · latest <span style={{ color: 'var(--orange, #FF9500)', fontWeight: 600 }}>{money(d.latest)}</span> (+{money(d.delta)})
+              </span>
+            </div>
+          ))}
+          <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 8 }}>
+            Either the bill went up (update its expected amount so projections stay honest) or it's worth a call to lower it.
+          </div>
+        </div>
+      )}
+
+      {/* Annual cost ranking — the expense-reduction hit list */}
+      {showAnnual && creep?.annual?.length > 0 && (
+        <div className="apple-card" style={{ padding: '18px 24px', marginBottom: 16 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>What each bill costs per year</div>
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>
+            Sorted biggest first. Small monthly amounts look harmless — the yearly number is what to negotiate or cancel against.
+          </div>
+          {creep.annual.map(a => (
+            <div key={a.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+              padding: '6px 0', borderBottom: '1px solid var(--border)', fontSize: 13, gap: 10 }}>
+              <span style={{ fontWeight: 500 }}>{a.name}</span>
+              <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+                <span style={{ color: 'var(--text-tertiary)', marginRight: 10 }}>{money(a.monthly)}/mo</span>
+                <span style={{ fontWeight: 700 }}>{money(a.annual)}/yr</span>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Table */}
       <div className="apple-card" style={{ padding: '8px 16px' }}>

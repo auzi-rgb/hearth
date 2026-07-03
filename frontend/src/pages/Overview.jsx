@@ -285,6 +285,95 @@ function TmrsCard({ data, onSave }) {
   )
 }
 
+// Month in Review — the report card history. Generated automatically on the 1st;
+// the button exists for catching up on months before the feature existed.
+function MonthReviewCard({ active }) {
+  const [reports, setReports] = useState([])
+  const [expanded, setExpanded] = useState(null)
+  const [generating, setGenerating] = useState(false)
+
+  function load() {
+    fetch(`${API}/reports`).then(r => r.json()).then(d => setReports(Array.isArray(d) ? d : [])).catch(() => {})
+  }
+  useEffect(() => { if (active) load() }, [active])
+
+  async function generate() {
+    setGenerating(true)
+    try {
+      await fetch(`${API}/reports/generate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+      load()
+    } catch {}
+    setGenerating(false)
+  }
+
+  const monthLabel = m => new Date(m + '-15T12:00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+
+  return (
+    <div className="apple-card" style={{ padding: '24px 28px', marginBottom: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+        <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: '-0.02em' }}>Month in Review</div>
+        <button className="apple-btn-secondary" onClick={generate} disabled={generating} style={{ fontSize: 12 }}>
+          {generating ? 'Generating…' : 'Generate last month'}
+        </button>
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 14 }}>
+        Income − obligations − everyday spending = surplus. The surplus is what pays down debt (and later, builds savings).
+      </div>
+      {reports.length === 0 && (
+        <div style={{ fontSize: 13, color: 'var(--text-tertiary)', fontStyle: 'italic' }}>
+          No reports yet — one is generated automatically on the 1st of each month.
+        </div>
+      )}
+      {reports.map(r => (
+        <div key={r.month} style={{ borderBottom: '1px solid var(--border)' }}>
+          <div onClick={() => setExpanded(expanded === r.month ? null : r.month)}
+            style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+              padding: '10px 0', cursor: 'pointer', gap: 10, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 14, fontWeight: 600 }}>{monthLabel(r.month)}</span>
+            <span style={{ fontSize: 13, fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
+              in {money(r.income)} · out {money((r.obligations || 0) + (r.discretionary || 0))} ·{' '}
+              <span style={{ fontWeight: 700, color: r.surplus >= 0 ? 'var(--accent-text)' : 'var(--red)' }}>
+                {r.surplus >= 0 ? '+' : ''}{money(r.surplus)}
+              </span>
+              <span style={{ marginLeft: 8, color: 'var(--text-tertiary)' }}>{expanded === r.month ? '▲' : '▼'}</span>
+            </span>
+          </div>
+          {expanded === r.month && (
+            <div style={{ paddingBottom: 12, fontSize: 13 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginBottom: 10 }}>
+                {[
+                  ['Income', money(r.income), 'var(--accent-text)'],
+                  ['Bills paid', `${money(r.obligations)} (${r.bills_paid_count})`, 'var(--text-primary)'],
+                  ['Everyday spending', money(r.discretionary), 'var(--text-primary)'],
+                  ['Surplus', money(r.surplus), r.surplus >= 0 ? 'var(--accent-text)' : 'var(--red)'],
+                  ['Transfers recorded', money(r.transfers_total), 'var(--text-primary)'],
+                  r.debt_change != null ? ['Debt change', `${r.debt_change <= 0 ? '↓' : '↑'}${money(Math.abs(r.debt_change))}`, r.debt_change <= 0 ? 'var(--accent-text)' : 'var(--red)'] : null,
+                  r.net_worth_change != null ? ['Net worth change', `${r.net_worth_change >= 0 ? '+' : ''}${money(r.net_worth_change)}`, r.net_worth_change >= 0 ? 'var(--accent-text)' : 'var(--red)'] : null,
+                ].filter(Boolean).map(([label, value, color]) => (
+                  <div key={label} style={{ background: 'var(--bg-subtle)', borderRadius: 8, padding: '8px 12px' }}>
+                    <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-tertiary)', marginBottom: 2 }}>{label}</div>
+                    <div style={{ fontSize: 15, fontWeight: 700, fontVariantNumeric: 'tabular-nums', color }}>{value}</div>
+                  </div>
+                ))}
+              </div>
+              {r.bills_unpaid_count > 0 && (
+                <div style={{ fontSize: 12, color: 'var(--orange, #FF9500)', marginBottom: 8 }}>
+                  {r.bills_unpaid_count} monthly bill{r.bills_unpaid_count !== 1 ? 's were' : ' was'} never marked paid — obligations may be understated.
+                </div>
+              )}
+              {r.top_categories?.length > 0 && (
+                <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                  Top spending: {r.top_categories.map(c => `${c.category} ${money(c.total)}`).join(' · ')}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export default function Overview({ active, debtExtra }) {
   const isWide = useIsWide()
   const [dash, setDash] = useState(null)
@@ -605,6 +694,8 @@ export default function Overview({ active, debtExtra }) {
           </>
         )}
       </div>
+
+      <MonthReviewCard active={active} />
 
       {loanModal !== undefined && (
         <LoanModal loan={loanModal} onClose={() => setLoanModal(undefined)} onSaved={loadLoans} />

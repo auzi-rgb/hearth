@@ -162,6 +162,15 @@ export default function Dashboard({ active, navigateTo }) {
   const [editingBuffer, setEditingBuffer] = useState(false)
   const [bufferInput, setBufferInput] = useState('')
   const [savingBuffer, setSavingBuffer] = useState(false)
+  const [briefing, setBriefing] = useState(null)
+  const [briefingOpen, setBriefingOpen] = useState(true)
+  const [recordingXfer, setRecordingXfer] = useState(false)
+  const [xferAmount, setXferAmount] = useState('')
+  const [savingXfer, setSavingXfer] = useState(false)
+  const [editingSched, setEditingSched] = useState(false)
+  const [schedMode, setSchedMode] = useState('days')
+  const [schedDays, setSchedDays] = useState('1, 15')
+  const [savingSched, setSavingSched] = useState(false)
   const timerRef = useRef(null)
   const isMobile = useIsMobile()
   const isWide   = useIsWide()
@@ -170,6 +179,16 @@ export default function Dashboard({ active, navigateTo }) {
     try {
       const dash = await fetch(`${API}/dashboard`).then(r => r.json())
       setData(dash)
+    } catch {}
+    try {
+      const b = await fetch(`${API}/ai/briefing`).then(r => r.json())
+      setBriefing(b?.content ? b : null)
+    } catch {}
+    try {
+      const s = await fetch(`${API}/settings`).then(r => r.json())
+      const sched = JSON.parse(s.transfer_schedule || '{}')
+      if (sched.mode === 'payday') setSchedMode('payday')
+      else if (Array.isArray(sched.days)) { setSchedMode('days'); setSchedDays(sched.days.join(', ')) }
     } catch {}
   }, [])
 
@@ -219,6 +238,37 @@ export default function Dashboard({ active, navigateTo }) {
     setSavingBuffer(false)
   }
 
+  async function recordTransfer() {
+    const val = parseFloat(xferAmount)
+    if (isNaN(val) || val <= 0) return
+    setSavingXfer(true)
+    try {
+      await fetch(`${API}/transfers`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount: val, suggested_amount: data?.suggested_transfer ?? null }),
+      })
+      setRecordingXfer(false)
+      await load()
+    } catch {}
+    setSavingXfer(false)
+  }
+
+  async function saveSchedule() {
+    setSavingSched(true)
+    try {
+      const sched = schedMode === 'payday'
+        ? { mode: 'payday' }
+        : { mode: 'days', days: schedDays.split(',').map(s => parseInt(s.trim(), 10)).filter(n => n >= 1 && n <= 28) }
+      await fetch(`${API}/settings/transfer_schedule`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: JSON.stringify(sched) }),
+      })
+      setEditingSched(false)
+      await load()
+    } catch {}
+    setSavingSched(false)
+  }
+
   const px = isMobile ? '16px' : '36px'
 
   if (!data) {
@@ -235,8 +285,14 @@ export default function Dashboard({ active, navigateTo }) {
   const monthlyBills    = data.monthly_bills_total      ?? 0
   const monthlySurplus  = data.monthly_surplus          ?? 0
   const suggestedXfer   = data.suggested_transfer       ?? 0
-  const xferDate        = data.suggested_transfer_date  ?? '—'
+  const xferDate        = data.next_transfer_date
+    ? new Date(data.next_transfer_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+    : '—'
   const daysToXfer      = data.days_until_next_transfer ?? 0
+  const lastXfer        = data.last_transfer
+  const allowance       = data.food_daily_allowance
+  const pace            = data.food_daily_pace
+  const overPace        = allowance != null && pace != null && pace > allowance
   const safeBuffer      = data.safe_spend_buffer        ?? 200
 
   let paycheckLabel = null
@@ -321,6 +377,67 @@ export default function Dashboard({ active, navigateTo }) {
         </div>
       )}
 
+      {/* ── Coach briefing (generated overnight by the AI, numbers precomputed) ── */}
+      {briefing && (
+        <div className="apple-card" style={{ padding: '18px 22px', marginBottom: 16, borderLeft: '3px solid var(--accent)' }}>
+          <div onClick={() => setBriefingOpen(o => !o)}
+            style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: 'var(--text-tertiary)' }}>
+              Morning Briefing
+              <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0, marginLeft: 8 }}>
+                {briefing.briefing_date}
+              </span>
+            </div>
+            <span style={{ fontSize: 11, color: 'var(--text-tertiary)', transform: briefingOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}>▼</span>
+          </div>
+          {briefingOpen && (
+            <div style={{ fontSize: 14, color: 'var(--text-primary)', lineHeight: 1.65, marginTop: 10 }}>
+              {briefing.content}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Debt countdown ─────────────────────────────────────────────────── */}
+      {(data.debt_total ?? 0) > 0 && (
+        <div className="apple-card" onClick={() => navigateTo?.('debt')}
+          style={{ padding: '16px 22px', marginBottom: 16, cursor: 'pointer',
+            display: 'flex', flexWrap: 'wrap', gap: isMobile ? 12 : 26, alignItems: 'baseline' }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: 'var(--text-tertiary)' }}>Debt-free</div>
+            <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '-0.03em' }}>
+              {data.debt_free_date
+                ? new Date(data.debt_free_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
+                : '—'}
+              {data.debt_free_months != null && (
+                <span style={{ fontSize: 12, fontWeight: 400, color: 'var(--text-tertiary)', marginLeft: 6 }}>
+                  {data.debt_free_months} mo
+                </span>
+              )}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: 'var(--text-tertiary)' }}>Remaining</div>
+            <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '-0.03em', fontVariantNumeric: 'tabular-nums' }}>{money(data.debt_total)}</div>
+          </div>
+          {data.debt_change_month != null && (
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: 'var(--text-tertiary)' }}>This month</div>
+              <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '-0.03em', fontVariantNumeric: 'tabular-nums',
+                color: data.debt_change_month <= 0 ? 'var(--accent-text)' : 'var(--red)' }}>
+                {data.debt_change_month <= 0 ? '↓' : '↑'}{money(Math.abs(data.debt_change_month))}
+              </div>
+            </div>
+          )}
+          {data.debt_focus && (
+            <div style={{ marginLeft: 'auto', textAlign: 'right' }}>
+              <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: 'var(--text-tertiary)' }}>Focus next</div>
+              <div style={{ fontSize: 14, fontWeight: 600 }}>{data.debt_focus}</div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ── Cards 1 + 2: side-by-side on tablet/desktop ────────────────────── */}
       <div style={{
         display: 'grid',
@@ -371,9 +488,38 @@ export default function Dashboard({ active, navigateTo }) {
             {money(suggestedXfer)}
           </span>
         </div>
-        <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 10, textAlign: 'right' }}>
-          Next transfer: {xferDate}{daysToXfer === 0 ? ' (today)' : daysToXfer === 1 ? ' (tomorrow)' : ` (${daysToXfer} days)`}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+          <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
+            Next transfer: {xferDate}{daysToXfer === 0 ? ' (today)' : daysToXfer === 1 ? ' (tomorrow)' : ` (${daysToXfer} days)`}
+          </span>
+          <button onClick={() => setEditingSched(s => !s)} title="Edit transfer schedule"
+            style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 10, color: 'var(--text-tertiary)', padding: 0, fontFamily: 'inherit' }}>
+            ✎
+          </button>
         </div>
+        {editingSched && (
+          <div style={{ padding: '10px 12px', background: 'var(--bg-subtle)', borderRadius: 8, marginBottom: 12,
+            display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <select className="apple-select" value={schedMode} onChange={e => setSchedMode(e.target.value)} style={{ fontSize: 12 }}>
+              <option value="days">Days of month</option>
+              <option value="payday">On paydays</option>
+            </select>
+            {schedMode === 'days' && (
+              <input className="apple-input" value={schedDays} onChange={e => setSchedDays(e.target.value)}
+                placeholder="1, 15" style={{ width: 90, fontSize: 12, padding: '4px 8px' }} />
+            )}
+            <button onClick={saveSchedule} disabled={savingSched}
+              style={{ fontSize: 11, padding: '4px 10px', borderRadius: 6, border: 'none',
+                background: 'var(--blue)', color: '#fff', cursor: 'pointer', fontFamily: 'inherit' }}>
+              {savingSched ? '…' : 'Save'}
+            </button>
+            <button onClick={() => setEditingSched(false)}
+              style={{ fontSize: 11, padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)',
+                background: 'none', color: 'var(--text-secondary)', cursor: 'pointer', fontFamily: 'inherit' }}>
+              ✕
+            </button>
+          </div>
+        )}
 
         {/* Safety buffer row */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -416,18 +562,52 @@ export default function Dashboard({ active, navigateTo }) {
           )}
         </div>
 
-        <button onClick={copyTransfer} style={{
-          width: '100%', padding: '12px 0',
-          background: copied ? 'rgba(52,199,89,0.12)' : 'var(--bg-subtle)',
-          border: `1px solid ${copied ? 'rgba(52,199,89,0.3)' : 'var(--border)'}`,
-          borderRadius: 10, fontSize: 14, fontWeight: 600, cursor: 'pointer',
-          color: copied ? 'var(--accent-text)' : 'var(--text-primary)',
-          transition: 'all 0.2s', fontFamily: 'inherit',
-        }}>
-          {copied ? '✓ Copied' : `Copy ${money(suggestedXfer)}`}
-        </button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={copyTransfer} style={{
+            flex: 1, padding: '12px 0',
+            background: copied ? 'rgba(52,199,89,0.12)' : 'var(--bg-subtle)',
+            border: `1px solid ${copied ? 'rgba(52,199,89,0.3)' : 'var(--border)'}`,
+            borderRadius: 10, fontSize: 14, fontWeight: 600, cursor: 'pointer',
+            color: copied ? 'var(--accent-text)' : 'var(--text-primary)',
+            transition: 'all 0.2s', fontFamily: 'inherit',
+          }}>
+            {copied ? '✓ Copied' : `Copy ${money(suggestedXfer)}`}
+          </button>
+          <button onClick={() => { setXferAmount(String(Number(suggestedXfer).toFixed(2))); setRecordingXfer(r => !r) }} style={{
+            flex: 1, padding: '12px 0',
+            background: 'var(--bg-subtle)', border: '1px solid var(--border)',
+            borderRadius: 10, fontSize: 14, fontWeight: 600, cursor: 'pointer',
+            color: 'var(--text-primary)', fontFamily: 'inherit',
+          }}>
+            Record transfer
+          </button>
+        </div>
+        {recordingXfer && (
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 10,
+            padding: '10px 12px', background: 'var(--bg-subtle)', borderRadius: 8 }}>
+            <span style={{ fontSize: 13, color: 'var(--text-secondary)', flexShrink: 0 }}>I moved $</span>
+            <input type="number" min="0" step="0.01" value={xferAmount} autoFocus
+              onChange={e => setXferAmount(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') recordTransfer(); if (e.key === 'Escape') setRecordingXfer(false) }}
+              style={{ flex: 1, minWidth: 70, fontSize: 13, padding: '4px 8px', borderRadius: 6,
+                border: '1px solid var(--border)', background: 'var(--bg-modal)',
+                color: 'var(--text-primary)', fontFamily: 'inherit' }} />
+            <button onClick={recordTransfer} disabled={savingXfer}
+              style={{ fontSize: 12, padding: '5px 12px', borderRadius: 6, border: 'none',
+                background: 'var(--blue)', color: '#fff', cursor: 'pointer', fontFamily: 'inherit' }}>
+              {savingXfer ? '…' : 'Save'}
+            </button>
+            <button onClick={() => setRecordingXfer(false)}
+              style={{ fontSize: 12, padding: '5px 8px', borderRadius: 6, border: '1px solid var(--border)',
+                background: 'none', color: 'var(--text-secondary)', cursor: 'pointer', fontFamily: 'inherit' }}>
+              ✕
+            </button>
+          </div>
+        )}
         <div style={{ fontSize: 11, color: 'var(--text-tertiary)', textAlign: 'center', marginTop: 6 }}>
-          Transfer to Food account (5784)
+          {lastXfer
+            ? `Last recorded: ${money(lastXfer.amount)} on ${new Date(lastXfer.transfer_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
+            : 'Transfer to the Food account, then record it to track your real spending rate'}
         </div>
       </div>
 
@@ -454,6 +634,23 @@ export default function Dashboard({ active, navigateTo }) {
             {daysToXfer === 0 ? 'today' : daysToXfer === 1 ? 'tomorrow' : `${daysToXfer} days`}
           </span>
         </div>
+        {allowance != null && (
+          <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0',
+            borderTop: '1px solid var(--border)', fontSize: 14 }}>
+            <span style={{ color: 'var(--text-secondary)' }}>Runway until then</span>
+            <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{money(allowance)}/day</span>
+          </div>
+        )}
+        {pace != null && (
+          <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0',
+            borderTop: '1px solid var(--border)', fontSize: 14 }}>
+            <span style={{ color: 'var(--text-secondary)' }}>Actual pace (14 days)</span>
+            <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums',
+              color: overPace ? 'var(--red)' : 'var(--accent-text)' }}>
+              {money(pace)}/day {overPace ? '· over' : '· on track'}
+            </span>
+          </div>
+        )}
         {paycheckLabel && (
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
             padding: '10px 0', borderTop: '1px solid var(--border)', fontSize: 14, gap: 12 }}>

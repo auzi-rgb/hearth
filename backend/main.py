@@ -265,6 +265,33 @@ def init_db():
     )""")
     conn.commit()
 
+    # Bills → Food transfers: the app suggests an amount; recording what was
+    # actually moved is what turns the suggestion into a trackable habit.
+    conn.execute("""CREATE TABLE IF NOT EXISTS transfers (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        transfer_date    TEXT NOT NULL,
+        amount           REAL NOT NULL,
+        suggested_amount REAL,
+        notes            TEXT,
+        created_at       TEXT NOT NULL
+    )""")
+    # Month in Review report cards — data is the computed JSON snapshot
+    conn.execute("""CREATE TABLE IF NOT EXISTS monthly_reports (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        month      TEXT NOT NULL UNIQUE,
+        data       TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""")
+    # Nightly AI coach briefings — generated overnight, read instantly by the UI
+    conn.execute("""CREATE TABLE IF NOT EXISTS ai_briefings (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        briefing_date TEXT NOT NULL UNIQUE,
+        content       TEXT NOT NULL,
+        model         TEXT,
+        created_at    TEXT NOT NULL
+    )""")
+    conn.commit()
+
     # AI long-term memory tables
     conn.execute("""CREATE TABLE IF NOT EXISTS ai_facts (
         id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1242,18 +1269,62 @@ async def dashboard():
     # moving out money the overdraft simulation above says you'll need.
     suggested_transfer = max(0.0, safe_today)
 
-    # Next transfer date: 1st or 15th of each month
-    _t_dates = [
-        date(today.year, today.month, 1),
-        date(today.year, today.month, 15),
-    ]
-    _nm = today.month % 12 + 1
-    _ny = today.year if today.month < 12 else today.year + 1
-    _t_dates += [date(_ny, _nm, 1), date(_ny, _nm, 15)]
-    _upcoming = [d for d in _t_dates if d >= today]
-    next_transfer = _upcoming[0]
+    # Next transfer date comes from the household's configured schedule
+    # (settings: transfer_schedule) — either fixed days of the month or
+    # aligned to paydays. Default preserves the original 1st/15th behavior.
+    try:
+        _sched = json.loads(get_setting(conn, "transfer_schedule") or "{}")
+    except (ValueError, TypeError):
+        _sched = {}
+    if _sched.get("mode") == "payday":
+        next_transfer = next_pay_date
+    else:
+        try:
+            _days = sorted({int(d) for d in _sched.get("days", [1, 15]) if 1 <= int(d) <= 28}) or [1, 15]
+        except (ValueError, TypeError):
+            _days = [1, 15]
+        _nm_first = (today.replace(day=28) + timedelta(days=4)).replace(day=1)
+        _t_dates = [today.replace(day=dd) for dd in _days] + [_nm_first.replace(day=dd) for dd in _days]
+        next_transfer = min(d for d in _t_dates if d >= today)
     days_until_next_transfer = (next_transfer - today).days
-    suggested_transfer_date = "1st" if next_transfer.day == 1 else "15th"
+
+    _last_xfer = conn.execute(
+        "SELECT transfer_date, amount, suggested_amount FROM transfers ORDER BY transfer_date DESC, id DESC LIMIT 1"
+    ).fetchone()
+
+    # Food runway: what the Food balance allows per day until the next transfer,
+    # vs the actual daily pace over the last 14 days. The mid-cycle early warning
+    # that makes "month to month" visible before transfer day.
+    food_daily_allowance = None
+    food_daily_pace = None
+    if food_account:
+        food_daily_allowance = round(food_balance / max(1, days_until_next_transfer), 2)
+        _pace_row = conn.execute(
+            """SELECT ABS(SUM(amount)) as t FROM transactions
+               WHERE account_id=? AND amount < 0 AND is_transfer=0 AND is_pending=0
+                 AND transaction_date >= ?""",
+            (food_account["id"], (today - timedelta(days=14)).isoformat())
+        ).fetchone()
+        food_daily_pace = round((_pace_row["t"] or 0) / 14, 2)
+
+    # Debt countdown: same debt set and avalanche simulation as /api/debt/strategies,
+    # surfaced on the dashboard so the payoff goal is visible every day.
+    _debts = _collect_debts(conn)
+    debt_total = round(sum(d["balance"] for d in _debts), 2)
+    debt_free_date = None
+    debt_free_months = None
+    debt_focus = None
+    if _debts:
+        _plan = _simulate_payoff_strategy([dict(d) for d in _debts], 0, "avalanche", True)
+        if _plan["fully_paid_off"]:
+            debt_free_date = _plan["debt_free_date"]
+            debt_free_months = _plan["months"]
+        debt_focus = _plan["payoff_order"][0] if _plan["payoff_order"] else None
+    _prev_liab = conn.execute(
+        "SELECT liabilities FROM net_worth_history WHERE recorded_at < ? ORDER BY recorded_at DESC LIMIT 1",
+        (today.replace(day=1).isoformat(),)
+    ).fetchone()
+    debt_change_month = round(debt_total - float(_prev_liab["liabilities"]), 2) if _prev_liab else None
 
     conn.close()
     return {
@@ -1288,8 +1359,16 @@ async def dashboard():
         "monthly_bills_total": fmt_money(monthly_bills_total),
         "monthly_surplus": fmt_money(monthly_surplus),
         "suggested_transfer": fmt_money(suggested_transfer),
-        "suggested_transfer_date": suggested_transfer_date,
+        "next_transfer_date": next_transfer.isoformat(),
         "days_until_next_transfer": days_until_next_transfer,
+        "last_transfer": dict(_last_xfer) if _last_xfer else None,
+        "food_daily_allowance": food_daily_allowance,
+        "food_daily_pace": food_daily_pace,
+        "debt_total": debt_total,
+        "debt_free_date": debt_free_date,
+        "debt_free_months": debt_free_months,
+        "debt_focus": debt_focus,
+        "debt_change_month": debt_change_month,
         "overdraft_warnings": overdraft_warnings,
         "cash_flow_timeline": cash_flow_timeline,
     }
@@ -2015,9 +2094,10 @@ async def update_account_type(acct_id: int, request: Request):
     conn.close()
     return {"updated": acct_id, "type": new_type}
 
-@router.get("/api/debt/strategies")
-async def debt_strategies(extra_monthly: float = 0, cards_first: bool = True):
-    conn = get_db()
+def _collect_debts(conn) -> list:
+    """Every active debt (synced credit/loan accounts + manual loans) with the
+    minimum-payment logic shared by the strategies endpoint and the dashboard
+    countdown — one debt list, one set of rules."""
     # SimpleFin-synced debt accounts — credit cards and loans use identical interest/
     # balance math, so they're built the same way here regardless of which type they are.
     synced_accounts = conn.execute(
@@ -2086,6 +2166,12 @@ async def debt_strategies(extra_monthly: float = 0, cards_first: bool = True):
             "negative_amortization": raw_min_payment <= monthly_interest and monthly_interest > 0,
             "source": "loan",
         })
+    return debts
+
+@router.get("/api/debt/strategies")
+async def debt_strategies(extra_monthly: float = 0, cards_first: bool = True):
+    conn = get_db()
+    debts = _collect_debts(conn)
     conn.close()
     if not debts:
         return {"debts": [], "snowball": None, "avalanche": None}
@@ -2100,6 +2186,197 @@ async def debt_strategies(extra_monthly: float = 0, cards_first: bool = True):
         "extra_monthly": extra_monthly,
         "cards_first": cards_first,
     }
+
+# ── Transfers (Bills → Food) ──────────────────────────────────────────────────
+
+@router.get("/api/transfers")
+async def list_transfers(limit: int = 24):
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM transfers ORDER BY transfer_date DESC, id DESC LIMIT ?", (limit,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+@router.post("/api/transfers")
+async def record_transfer(request: Request):
+    body = await request.json()
+    amount = body.get("amount")
+    if amount is None:
+        raise HTTPException(status_code=400, detail="amount required")
+    conn = get_db()
+    cur = conn.execute(
+        "INSERT INTO transfers (transfer_date, amount, suggested_amount, notes, created_at) VALUES (?,?,?,?,?)",
+        (
+            body.get("transfer_date") or date.today().isoformat(),
+            float(amount),
+            body.get("suggested_amount"),
+            body.get("notes"),
+            datetime.now().isoformat(),
+        )
+    )
+    conn.commit()
+    tid = cur.lastrowid
+    conn.close()
+    return {"id": tid}
+
+@router.delete("/api/transfers/{transfer_id}")
+async def delete_transfer(transfer_id: int):
+    conn = get_db()
+    conn.execute("DELETE FROM transfers WHERE id=?", (transfer_id,))
+    conn.commit()
+    conn.close()
+    return {"deleted": transfer_id}
+
+# ── Bill creep ────────────────────────────────────────────────────────────────
+
+@router.get("/api/bills/creep")
+async def bill_creep():
+    """Two views for expense reduction: bills whose recent actual payments drifted
+    above the expected amount, and every bill ranked by true annual cost."""
+    conn = get_db()
+    bills = conn.execute("SELECT * FROM bills WHERE is_active=1").fetchall()
+    since = (date.today() - timedelta(days=120)).isoformat()
+    annual = []
+    drifting = []
+    for b in bills:
+        monthly_eq = round(float(b["expected_amount"]) * (52 / 12), 2) if b["frequency"] == "weekly" else float(b["expected_amount"])
+        annual.append({
+            "id": b["id"],
+            "name": b["display_name"] or b["name"],
+            "monthly": fmt_money(monthly_eq),
+            "annual": fmt_money(monthly_eq * 12),
+            "payment_type": b["payment_type"],
+        })
+        # Drift detection only works for bills matched to an account by name prefix
+        # (same matching the history endpoint uses), and only monthly ones.
+        if not b["account_id"] or b["frequency"] == "weekly" or float(b["expected_amount"]) <= 0:
+            continue
+        txns = conn.execute(
+            "SELECT amount, transaction_date FROM transactions WHERE account_id=? AND transaction_date >= ? AND amount < 0 AND description LIKE ? ORDER BY transaction_date DESC LIMIT 3",
+            (b["account_id"], since, f"%{b['name'][:8]}%")
+        ).fetchall()
+        if not txns:
+            continue
+        latest = abs(float(txns[0]["amount"]))
+        expected = float(b["expected_amount"])
+        if latest > expected * 1.05:
+            drifting.append({
+                "id": b["id"],
+                "name": b["display_name"] or b["name"],
+                "expected": fmt_money(expected),
+                "latest": fmt_money(latest),
+                "delta": fmt_money(latest - expected),
+                "latest_date": txns[0]["transaction_date"],
+            })
+    conn.close()
+    annual.sort(key=lambda x: -x["annual"])
+    drifting.sort(key=lambda x: -x["delta"])
+    return {"annual": annual, "annual_total": round(sum(a["annual"] for a in annual), 2), "drifting": drifting}
+
+# ── Month in Review ───────────────────────────────────────────────────────────
+
+def compute_month_review(conn, month: str) -> dict:
+    """All Python, no AI: the month's report card. income − obligations −
+    discretionary = surplus; debt and net-worth change from snapshots."""
+    month_start = f"{month}-01"
+    next_month = (date.fromisoformat(month_start).replace(day=28) + timedelta(days=4)).replace(day=1).isoformat()
+
+    income = float(conn.execute(
+        "SELECT COALESCE(SUM(actual_amount), 0) FROM paychecks WHERE actual_date >= ? AND actual_date < ?",
+        (month_start, next_month)
+    ).fetchone()[0])
+
+    obligations_row = conn.execute(
+        """SELECT COALESCE(SUM(b.expected_amount), 0) as total, COUNT(*) as cnt
+           FROM bill_paid_months pm JOIN bills b ON b.id = pm.bill_id
+           WHERE pm.month = ?""", (month,)
+    ).fetchone()
+    obligations = float(obligations_row["total"])
+    bills_paid_count = obligations_row["cnt"]
+    bills_unpaid_count = conn.execute(
+        "SELECT COUNT(*) FROM bills WHERE is_active=1 AND frequency='monthly' AND id NOT IN (SELECT bill_id FROM bill_paid_months WHERE month=?)",
+        (month,)
+    ).fetchone()[0]
+
+    discretionary = float(conn.execute(
+        """SELECT COALESCE(ABS(SUM(amount)), 0) FROM transactions
+           WHERE amount < 0 AND is_transfer=0 AND is_pending=0
+             AND (category IS NULL OR category NOT IN ('bill', 'debt_payment'))
+             AND transaction_date >= ? AND transaction_date < ?""",
+        (month_start, next_month)
+    ).fetchone()[0])
+
+    top_cats = [
+        {"category": r["category"] or "uncategorized", "total": fmt_money(abs(r["t"]))}
+        for r in conn.execute(
+            """SELECT category, SUM(amount) as t FROM transactions
+               WHERE amount < 0 AND is_transfer=0 AND is_pending=0
+                 AND (category IS NULL OR category NOT IN ('bill', 'debt_payment'))
+                 AND transaction_date >= ? AND transaction_date < ?
+               GROUP BY category ORDER BY t LIMIT 5""",
+            (month_start, next_month)
+        ).fetchall()
+    ]
+
+    transfers_total = float(conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) FROM transfers WHERE transfer_date >= ? AND transfer_date < ?",
+        (month_start, next_month)
+    ).fetchone()[0])
+
+    nw_first = conn.execute(
+        "SELECT * FROM net_worth_history WHERE recorded_at < ? ORDER BY recorded_at DESC LIMIT 1",
+        (month_start,)
+    ).fetchone()
+    nw_last = conn.execute(
+        "SELECT * FROM net_worth_history WHERE recorded_at < ? ORDER BY recorded_at DESC LIMIT 1",
+        (next_month,)
+    ).fetchone()
+    debt_change = net_worth_change = None
+    if nw_first and nw_last and nw_first["id"] != nw_last["id"]:
+        debt_change = fmt_money(float(nw_last["liabilities"]) - float(nw_first["liabilities"]))
+        net_worth_change = fmt_money(float(nw_last["net_worth"]) - float(nw_first["net_worth"]))
+
+    return {
+        "month": month,
+        "income": fmt_money(income),
+        "obligations": fmt_money(obligations),
+        "bills_paid_count": bills_paid_count,
+        "bills_unpaid_count": bills_unpaid_count,
+        "discretionary": fmt_money(discretionary),
+        "surplus": fmt_money(income - obligations - discretionary),
+        "transfers_total": fmt_money(transfers_total),
+        "top_categories": top_cats,
+        "debt_change": debt_change,
+        "net_worth_change": net_worth_change,
+    }
+
+@router.get("/api/reports")
+async def list_reports(limit: int = 12):
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT month, data, created_at FROM monthly_reports ORDER BY month DESC LIMIT ?", (limit,)
+    ).fetchall()
+    conn.close()
+    return [{"month": r["month"], "created_at": r["created_at"], **json.loads(r["data"])} for r in rows]
+
+@router.post("/api/reports/generate")
+async def generate_report(request: Request):
+    body = await request.json()
+    month = body.get("month")
+    if not month:
+        # Default: the month that just ended
+        first_this = date.today().replace(day=1)
+        month = (first_this - timedelta(days=1)).strftime("%Y-%m")
+    conn = get_db()
+    data = compute_month_review(conn, month)
+    conn.execute(
+        "INSERT OR REPLACE INTO monthly_reports (month, data, created_at) VALUES (?,?,?)",
+        (month, json.dumps(data), datetime.now().isoformat())
+    )
+    conn.commit()
+    conn.close()
+    return data
 
 @router.get("/api/spending/summary")
 async def spending_summary(days: int = 30, account_id: int = None):
@@ -2543,6 +2820,21 @@ async def record_net_worth():
     conn.commit()
     conn.close()
     return {"net_worth": fmt_money(nw), "assets": fmt_money(assets), "liabilities": fmt_money(liabilities)}
+
+@router.get("/api/ai/briefing")
+async def get_ai_briefing():
+    conn = get_db()
+    row = conn.execute("SELECT * FROM ai_briefings ORDER BY briefing_date DESC LIMIT 1").fetchone()
+    conn.close()
+    return dict(row) if row else {}
+
+@router.post("/api/ai/briefing/generate")
+async def trigger_ai_briefing():
+    from sync import generate_coach_briefing
+    try:
+        return await generate_coach_briefing()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Briefing failed: {e}")
 
 @router.get("/api/ai/context")
 async def ai_context():

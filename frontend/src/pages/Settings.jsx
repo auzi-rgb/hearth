@@ -60,6 +60,11 @@ export default function Settings({ active, onCrumb }) {
   const [householdMsg, setHouseholdMsg] = useState(null)
   const [householdSaving, setHouseholdSaving] = useState(false)
   const [newMemberName, setNewMemberName] = useState('')
+  const [paycheckMin, setPaycheckMin] = useState('500')
+
+  const [xferPhrases, setXferPhrases] = useState('')
+  const [xferPhrasesMsg, setXferPhrasesMsg] = useState(null)
+  const [xferPhrasesSaving, setXferPhrasesSaving] = useState(false)
 
   const [simplefinToken, setSimplefinToken] = useState('')
   const [simplefinMsg, setSimplefinMsg] = useState(null)
@@ -152,6 +157,8 @@ export default function Settings({ active, onCrumb }) {
         if (d.ai_autorun) setAiAutoRun(d.ai_autorun === 'true')
         if (d.ai_autorun_prompt) setAiAutoRunPrompt(d.ai_autorun_prompt)
         setHasSimplefin(d.has_simplefin === 'True' || d.has_simplefin === true)
+        if (d.paycheck_min_amount) setPaycheckMin(d.paycheck_min_amount)
+        if (d.transfer_detection_phrases) setXferPhrases(d.transfer_detection_phrases)
       }).catch(() => {})
     fetch(`${API}/ai/health`)
       .then(r => r.json())
@@ -212,6 +219,10 @@ export default function Settings({ active, onCrumb }) {
         puts.push(fetch(`${API}/settings/payday_dow_${m.key}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value: pd.dow }) }))
         puts.push(fetch(`${API}/settings/payday_frequency_${m.key}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value: pd.frequency }) }))
       }
+      const minVal = parseFloat(paycheckMin)
+      if (!isNaN(minVal) && minVal >= 0) {
+        puts.push(fetch(`${API}/settings/paycheck_min_amount`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value: minVal }) }))
+      }
       const results = await Promise.all(puts)
       if (results.some(r => !r.ok)) throw new Error('Save failed')
       setHouseholdMsg('Saved — applies to the next sync')
@@ -258,6 +269,21 @@ export default function Settings({ active, onCrumb }) {
       setSimplefinToken('')
     } catch (e) { setSimplefinMsg('!' + e.message) }
     finally { setSimplefinSaving(false) }
+  }
+
+  async function saveXferPhrases() {
+    setXferPhrasesSaving(true); setXferPhrasesMsg(null)
+    try {
+      const cleaned = xferPhrases.split(',').map(s => s.trim().toLowerCase()).filter(Boolean).join(', ')
+      const r = await fetch(`${API}/settings/transfer_detection_phrases`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: cleaned }),
+      })
+      if (!r.ok) throw new Error('Save failed')
+      setXferPhrases(cleaned)
+      setXferPhrasesMsg('Saved — applies to newly synced transactions')
+    } catch (e) { setXferPhrasesMsg('!' + e.message) }
+    finally { setXferPhrasesSaving(false) }
   }
 
   async function resetSimplefin() {
@@ -398,6 +424,7 @@ export default function Settings({ active, onCrumb }) {
       </div>
 
       {view === 'connections' && (
+        <>
         <Section title="SimpleFin Connection">
           {hasSimplefin ? (
             <div>
@@ -440,6 +467,19 @@ export default function Settings({ active, onCrumb }) {
             </form>
           )}
         </Section>
+        <Section title="Internal Transfer Detection">
+          <Field label="Transfer Phrases" hint="Comma-separated text that marks a synced transaction as an internal transfer (excluded from spending reports). Bank-specific — if you switch banks, add that bank's transfer wording here. Leave blank to use the built-in USAA defaults.">
+            <textarea className="apple-input" rows={2} value={xferPhrases}
+              onChange={e => setXferPhrases(e.target.value)}
+              placeholder="usaa funds transfer, funds transfer db, funds transfer cr, interest charged, cash advance interest, fid bkg svc"
+              style={{ resize: 'vertical', fontFamily: 'inherit', fontSize: 13 }} />
+          </Field>
+          <button className="apple-btn-primary" onClick={saveXferPhrases} disabled={xferPhrasesSaving} style={{ fontSize: 13 }}>
+            {xferPhrasesSaving ? 'Saving…' : 'Save'}
+          </button>
+          <StatusMsg msg={xferPhrasesMsg} />
+        </Section>
+        </>
       )}
 
       {view === 'ai' && (
@@ -680,6 +720,15 @@ export default function Settings({ active, onCrumb }) {
             <button className="apple-btn-secondary" onClick={addMember} disabled={!newMemberName.trim()} style={{ flexShrink: 0 }}>
               Add Member
             </button>
+          </div>
+          <div style={{ paddingTop: 14, marginBottom: 14, borderTop: '1px solid var(--border)' }}>
+            <Field label="Paycheck Detection Minimum" hint="Deposits below this amount are never treated as paychecks. Lower it if someone has a small side income the app should count.">
+              <div style={{ position: 'relative', width: 140 }}>
+                <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-secondary)', fontSize: 14, pointerEvents: 'none' }}>$</span>
+                <input className="apple-input" type="number" min="0" step="50" value={paycheckMin}
+                  onChange={e => setPaycheckMin(e.target.value)} style={{ paddingLeft: 24, width: '100%' }} />
+              </div>
+            </Field>
           </div>
           <button className="apple-btn-primary" onClick={saveHousehold} disabled={householdSaving}>
             {householdSaving ? 'Saving…' : 'Save Household'}

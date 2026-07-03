@@ -1,8 +1,16 @@
 import sqlite3
 import os
+import re
 import json
 from datetime import datetime, date, timedelta
 import httpx
+
+GATEWAY_URL = "https://10.0.0.24/gateway/api"
+
+# Bank-specific phrases that mark a transaction as an internal transfer (excluded
+# from spending). Overridable via the transfer_detection_phrases setting so a new
+# bank doesn't require a code change.
+DEFAULT_TRANSFER_PHRASES = "usaa funds transfer, funds transfer db, funds transfer cr, interest charged, cash advance interest, fid bkg svc"
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "finance.db")
 
@@ -47,6 +55,9 @@ async def run_sync():
     transactions_added = 0
     error_message = None
     warnings = []
+
+    _phrases_raw = get_setting(conn, "transfer_detection_phrases") or DEFAULT_TRANSFER_PHRASES
+    transfer_phrases = [p.strip().lower() for p in _phrases_raw.split(",") if p.strip()]
 
     try:
         # Fetch from SimpleFin — last 90 days
@@ -175,12 +186,7 @@ async def run_sync():
                 desc_lower = desc.lower()
                 is_transfer = 1 if (
                     acct_type in ('loan', 'savings', 'investment') or
-                    'usaa funds transfer' in desc_lower or
-                    'funds transfer db' in desc_lower or
-                    'funds transfer cr' in desc_lower or
-                    'interest charged' in desc_lower or
-                    'cash advance interest' in desc_lower or
-                    'fid bkg svc' in desc_lower
+                    any(p in desc_lower for p in transfer_phrases)
                 ) else 0
 
                 conn.execute(
@@ -279,6 +285,10 @@ def _detect_paychecks(conn):
     today = date.today()
     since = (today - timedelta(days=60)).isoformat()
 
+    # Deposits below this are never considered paychecks (settings-tunable —
+    # matters for side gigs or partial deposits).
+    min_amount = float(get_setting(conn, "paycheck_min_amount", "500") or 500)
+
     members = get_household(conn)
     member_keywords = [k for m in members for k in (m.get("payroll_keywords") or [])]
     # Fallback for deposits with no payroll keyword: only trust the configured
@@ -294,9 +304,9 @@ def _detect_paychecks(conn):
     ).fetchall()
     for a in accounts:
         txns = conn.execute(
-            """SELECT * FROM transactions WHERE account_id=? AND amount > 500
+            """SELECT * FROM transactions WHERE account_id=? AND amount > ?
                AND transaction_date >= ? ORDER BY transaction_date""",
-            (a["id"], since)
+            (a["id"], min_amount, since)
         ).fetchall()
         for txn in txns:
             desc_lower = (txn["description"] or "").lower()
@@ -307,7 +317,7 @@ def _detect_paychecks(conn):
             is_paycheck = any(
                 k in desc_lower for k in _GENERIC_PAYROLL_KEYWORDS + member_keywords
             )
-            if not is_paycheck and txn["amount"] > 500:
+            if not is_paycheck:
                 txn_date = date.fromisoformat(txn["transaction_date"])
                 if txn_date.weekday() in payday_dows:
                     is_paycheck = True
@@ -363,6 +373,136 @@ def _identify_paycheck_person(conn, desc_lower: str, amount: float, members: lis
         if (lo is None or amount >= lo) and (hi is None or amount <= hi):
             return m["key"]
     return members[0]["key"]
+
+# ── Nightly AI coach briefing ─────────────────────────────────────────────────
+# The model never computes anything: Python assembles every number, the model
+# only turns them into a short coaching paragraph. Runs overnight (3:45am, after
+# sync + snapshot) on the household's best model, since latency doesn't matter
+# when nobody is waiting.
+
+def _coach_context(conn) -> dict:
+    today = date.today()
+
+    def role_account(role, hint):
+        val = get_setting(conn, f"{role}_account_id")
+        row = None
+        if val:
+            try:
+                row = conn.execute("SELECT * FROM accounts WHERE id=? AND is_active=1", (int(val),)).fetchone()
+            except (ValueError, TypeError):
+                row = None
+        if not row:
+            row = conn.execute(
+                "SELECT * FROM accounts WHERE is_active=1 AND LOWER(name) LIKE ? LIMIT 1", (f"%{hint}%",)
+            ).fetchone()
+        return {"name": row["nickname"] or row["name"], "balance": round(float(row["current_balance"] or 0), 2)} if row else None
+
+    bills_next_7 = []
+    for b in conn.execute(
+        "SELECT name, expected_amount, day_of_month, frequency, day_of_week FROM bills WHERE is_active=1"
+    ).fetchall():
+        if b["frequency"] == "weekly" and b["day_of_week"] is not None:
+            due = today + timedelta(days=(b["day_of_week"] - today.weekday()) % 7)
+        elif b["day_of_month"]:
+            try:
+                due = today.replace(day=b["day_of_month"])
+            except ValueError:
+                continue
+            if due < today:
+                nm = (today.replace(day=28) + timedelta(days=4)).replace(day=1)
+                try:
+                    due = nm.replace(day=b["day_of_month"])
+                except ValueError:
+                    continue
+        else:
+            continue
+        if (due - today).days <= 7:
+            bills_next_7.append({"name": b["name"], "amount": round(float(b["expected_amount"]), 2), "due": due.isoformat()})
+
+    debt_total = sum(
+        abs(float(a["current_balance"] or 0))
+        for a in conn.execute(
+            "SELECT current_balance FROM accounts WHERE type IN ('credit','loan','personal_loan') AND is_active=1"
+        ).fetchall()
+    ) + sum(float(l["current_balance"] or 0) for l in conn.execute("SELECT current_balance FROM loans").fetchall())
+
+    spend_q = """SELECT COALESCE(ABS(SUM(amount)), 0) FROM transactions
+                 WHERE amount < 0 AND is_transfer=0 AND is_pending=0
+                   AND (category IS NULL OR category NOT IN ('bill','debt_payment'))
+                   AND transaction_date >= ? AND transaction_date <= ?"""
+    mtd = float(conn.execute(spend_q, (today.replace(day=1).isoformat(), today.isoformat())).fetchone()[0])
+    last_month_start = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
+    try:
+        last_same_day = last_month_start.replace(day=today.day)
+    except ValueError:
+        last_same_day = today.replace(day=1) - timedelta(days=1)
+    last_mtd = float(conn.execute(spend_q, (last_month_start.isoformat(), last_same_day.isoformat())).fetchone()[0])
+
+    last_xfer = conn.execute(
+        "SELECT transfer_date, amount FROM transfers ORDER BY transfer_date DESC, id DESC LIMIT 1"
+    ).fetchone()
+
+    return {
+        "date": today.isoformat(),
+        "bills_account": role_account("bills", "bills"),
+        "food_account": role_account("food", "food"),
+        "bills_due_next_7_days": sorted(bills_next_7, key=lambda x: x["due"]),
+        "total_debt": round(debt_total, 2),
+        "discretionary_spent_month_to_date": round(mtd, 2),
+        "discretionary_same_period_last_month": round(last_mtd, 2),
+        "last_recorded_transfer": dict(last_xfer) if last_xfer else None,
+    }
+
+async def generate_coach_briefing() -> dict:
+    conn = get_db()
+    enabled = (get_setting(conn, "ai_coach_enabled", "true") or "true").lower() != "false"
+    model = get_setting(conn, "ai_coach_model", "qwen2.5:14b") or "qwen2.5:14b"
+    if not enabled:
+        conn.close()
+        return {"status": "disabled"}
+    ctx = _coach_context(conn)
+    conn.close()
+
+    prompt = f"""You are the household's finance coach. Below are today's precomputed numbers from their finance app. All math is already done — never recalculate, estimate, or invent any number; only use figures exactly as given.
+
+Their system: all income lands in the Bills account, bills and debt payments come off the top, and the surplus is transferred to the Food account for day-to-day living. Their goal: spend less than they earn, pay off debt, then build savings.
+
+Write a short morning briefing — 4 to 6 sentences of plain language, no headers, no bullet points:
+- Lead with the single most useful thing to know today.
+- Mention upcoming bills only if they are notable.
+- Compare month-to-date spending against the same period last month.
+- End with one concrete, encouraging next action.
+
+Field meanings (be precise about these):
+- bills_due_next_7_days: bills due over the COMING WEEK. A bill is only "due today" if its due date equals today's date.
+- discretionary_spent_month_to_date: spent so far THIS month.
+- discretionary_same_period_last_month: spent over the SAME NUMBER OF DAYS at the start of LAST MONTH (a month-over-month comparison — never say "last year").
+
+Today's numbers:
+{json.dumps(ctx, indent=1)}"""
+
+    _timeout = httpx.Timeout(connect=30, read=900, write=30, pool=30)
+    async with httpx.AsyncClient(verify=False, timeout=_timeout) as client:
+        r = await client.post(
+            f"{GATEWAY_URL}/chat",
+            json={"model": model, "messages": [{"role": "user", "content": prompt}],
+                  "stream": False, "options": {"temperature": 0.4, "num_ctx": 4096}},
+            headers={"X-App-Name": "home-finance"},
+        )
+        d = r.json()
+        content = (d.get("message") or {}).get("content", "") or d.get("response", "")
+    # Reasoning models (deepseek-r1) wrap their thinking in <think> tags — strip it
+    content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
+    if not content:
+        return {"status": "empty"}
+    conn = get_db()
+    conn.execute(
+        "INSERT OR REPLACE INTO ai_briefings (briefing_date, content, model, created_at) VALUES (?,?,?,?)",
+        (date.today().isoformat(), content, model, datetime.now().isoformat())
+    )
+    conn.commit()
+    conn.close()
+    return {"status": "ok", "content": content, "model": model}
 
 BACKUP_DIR = os.path.join(os.path.dirname(__file__), "backups")
 BACKUP_KEEP = 14
@@ -452,6 +592,48 @@ def start_scheduler():
             hour=3,
             minute=30,
             id="daily_db_backup",
+            replace_existing=True,
+        )
+
+        async def coach_job():
+            try:
+                await generate_coach_briefing()
+            except Exception as e:
+                print(f"Coach briefing failed: {e}", flush=True)
+
+        scheduler.add_job(
+            coach_job,
+            "cron",
+            hour=3,
+            minute=45,
+            id="daily_coach_briefing",
+            replace_existing=True,
+        )
+
+        async def monthly_report_job():
+            try:
+                # Lazy import: main imports sync at startup, so importing main here
+                # at job time (long after startup) is safe and avoids the circular import.
+                from main import compute_month_review
+                conn = get_db()
+                month = (date.today().replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+                data = compute_month_review(conn, month)
+                conn.execute(
+                    "INSERT OR REPLACE INTO monthly_reports (month, data, created_at) VALUES (?,?,?)",
+                    (month, json.dumps(data), datetime.now().isoformat())
+                )
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                print(f"Monthly report failed: {e}", flush=True)
+
+        scheduler.add_job(
+            monthly_report_job,
+            "cron",
+            day=1,
+            hour=4,
+            minute=0,
+            id="monthly_report",
             replace_existing=True,
         )
         scheduler.start()
