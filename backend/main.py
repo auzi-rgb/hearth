@@ -1102,11 +1102,11 @@ async def dashboard():
     bills_before_pay = sum(
         b["amount"] for b in upcoming_bills if date.fromisoformat(b["due_date"]) <= next_pay_date
     )
-    spendable = bills_balance - bills_before_pay
+    # One buffer, one warning source: the day-by-day simulation below finds real
+    # future shortfalls (overdraft_warnings). The old static low_balance_threshold
+    # banner was retired — it compared a different number than it displayed and
+    # told you nothing actionable.
     safe_buffer = float(get_setting(conn, "safe_spend_buffer", "200"))
-    safe_to_spend = spendable - safe_buffer
-    threshold = float(get_setting(conn, "low_balance_threshold", "500"))
-    low_balance_warning = spendable < threshold
     # "Paid" status always comes from the same explicit bill_paid_months table the
     # Bills tab checkbox and Calendar toggle write to — never a separate guess based
     # on fuzzy-matching transaction descriptions, which could silently disagree with
@@ -1265,8 +1265,6 @@ async def dashboard():
         "assets": fmt_money(assets),
         "liabilities": fmt_money(liabilities),
         "tmrs_balance": fmt_money(tmrs_balance),
-        "spendable": fmt_money(spendable),
-        "safe_to_spend": fmt_money(safe_to_spend),
         "safe_spend_buffer": fmt_money(safe_buffer),
         "bills_balance": fmt_money(bills_balance),
         "bills_before_next_pay": fmt_money(bills_before_pay),
@@ -1276,8 +1274,6 @@ async def dashboard():
         "projected_month_end": fmt_money(projected_month_end),
         "safe_today": fmt_money(safe_today),
         "reserve_needed": fmt_money(reserve_needed),
-        "low_balance_warning": low_balance_warning,
-        "low_balance_threshold": threshold,
         "upcoming_bills": upcoming_bills[:10],
         "next_income": {**pay_by_member, "soonest": next_pay},
         "paycheck_variances": [dict(r) for r in variances],
@@ -1392,7 +1388,7 @@ async def calendar_data(month: str = None):
         })
     bills_acct = find_role_account(conn, "bills", "bills")
     bills_bal     = get_account_balance(conn, bills_acct["id"]) if bills_acct else 0.0
-    low_threshold = float(get_setting(conn, "low_balance_threshold", "500"))
+    safe_buffer = float(get_setting(conn, "safe_spend_buffer", "200"))
     conn.close()
     return {
         "month":                  month,
@@ -1400,7 +1396,7 @@ async def calendar_data(month: str = None):
         "bill_events":            bill_events,
         "pay_events":             pay_events,
         "bills_account_balance":  bills_bal,
-        "low_balance_threshold":  low_threshold,
+        "safe_spend_buffer":      safe_buffer,
     }
 
 @router.get("/api/transactions")

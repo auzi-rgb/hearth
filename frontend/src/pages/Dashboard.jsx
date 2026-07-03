@@ -321,20 +321,6 @@ export default function Dashboard({ active, navigateTo }) {
         </div>
       )}
 
-      {/* Low balance warning */}
-      {data.low_balance_warning && (
-        <div style={{
-          background: 'rgba(255,59,48,0.08)', border: '1px solid rgba(255,59,48,0.25)',
-          borderRadius: 12, padding: '14px 18px', marginBottom: 20,
-          display: 'flex', alignItems: 'center', gap: 10,
-        }}>
-          <span style={{ fontSize: 18 }}>⚠️</span>
-          <span style={{ fontSize: 14, color: 'var(--red)', fontWeight: 500 }}>
-            Low balance — Bills account {money(billsBal)} is below the {money(data.low_balance_threshold)} threshold
-          </span>
-        </div>
-      )}
-
       {/* ── Cards 1 + 2: side-by-side on tablet/desktop ────────────────────── */}
       <div style={{
         display: 'grid',

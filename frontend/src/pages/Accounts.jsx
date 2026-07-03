@@ -129,9 +129,37 @@ function AddAccountModal({ anchor, onClose, onSave }) {
   )
 }
 
-const COL = '1fr 140px 130px 120px 90px 90px 90px'
+const COL = '1fr 130px 120px 110px 84px 84px 84px 90px'
 
-function AccountCard({ a, isDupe, updateField, deactivate, reactivate }) {
+// Dashboard roles an account can play. Held here (on the account itself) rather
+// than in Settings, so the assignment is visible where the account lives.
+const ROLE_OPTIONS = [
+  { value: '',      label: '—' },
+  { value: 'bills', label: 'Bills' },
+  { value: 'food',  label: 'Food' },
+]
+const roleEligible = a => a.is_active && (a.type === 'checking' || a.type === 'savings')
+
+function RoleSelect({ a, role, setAccountRole }) {
+  if (!roleEligible(a)) return <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>—</span>
+  return (
+    <select
+      className="apple-select"
+      value={role}
+      onChange={e => setAccountRole(a.id, e.target.value)}
+      title="Dashboard role: which account pays bills / holds day-to-day spending"
+      style={{
+        fontSize: 12, padding: '3px 6px',
+        color: role ? 'var(--accent-text)' : 'var(--text-tertiary)',
+        fontWeight: role ? 600 : 400,
+      }}
+    >
+      {ROLE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+    </select>
+  )
+}
+
+function AccountCard({ a, isDupe, updateField, deactivate, reactivate, role, setAccountRole }) {
   return (
     <div className="apple-card" style={{
       padding: '14px 16px', marginBottom: 10,
@@ -156,6 +184,7 @@ function AccountCard({ a, isDupe, updateField, deactivate, reactivate }) {
         <select className="apple-select" value={a.type} onChange={e => updateField(a.id, 'type', e.target.value)} style={{ fontSize: 12, flex: 1, minWidth: 0 }}>
           {TYPES.map(t => <option key={t} value={t}>{t.replace('_', ' ')}</option>)}
         </select>
+        {roleEligible(a) && <RoleSelect a={a} role={role} setAccountRole={setAccountRole} />}
         <span style={{ fontSize: 11, color: 'var(--text-tertiary)', flexShrink: 0 }}>
           {a.simplefin_id ? 'SimpleFin' : 'Manual'}
         </span>
@@ -197,6 +226,7 @@ function ManualLoanRow({ loan, isMobile }) {
       <div style={{ fontSize: 13, fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: 'var(--red)' }}>
         {money(-Math.abs(loan.current_balance || 0))}
       </div>
+      <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>—</span>
       <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>Manual</span>
       <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)' }}>—</span>
       <span style={{ fontSize: 10, color: 'var(--text-tertiary)', fontStyle: 'italic' }}>Debt tab</span>
@@ -204,7 +234,7 @@ function ManualLoanRow({ loan, isMobile }) {
   )
 }
 
-function AccountSection({ label, accounts, duplicateIds, updateField, deactivate, reactivate, isMobile, manualLoans = [] }) {
+function AccountSection({ label, accounts, duplicateIds, updateField, deactivate, reactivate, isMobile, manualLoans = [], roleOf, setAccountRole }) {
   if (accounts.length === 0 && manualLoans.length === 0) return null
   const total = accounts.filter(a => a.is_active).reduce((s, a) => s + (a.balance || 0), 0)
     - manualLoans.reduce((s, l) => s + Math.abs(l.current_balance || 0), 0)
@@ -221,14 +251,14 @@ function AccountSection({ label, accounts, duplicateIds, updateField, deactivate
       {isMobile ? (
         <>
           {accounts.map(a => (
-            <AccountCard key={a.id} a={a} isDupe={duplicateIds.has(a.id)} updateField={updateField} deactivate={deactivate} reactivate={reactivate} />
+            <AccountCard key={a.id} a={a} isDupe={duplicateIds.has(a.id)} updateField={updateField} deactivate={deactivate} reactivate={reactivate} role={roleOf(a)} setAccountRole={setAccountRole} />
           ))}
           {manualLoans.map(l => <ManualLoanRow key={`loan-${l.id}`} loan={l} isMobile />)}
         </>
       ) : (
         <div style={{ background: 'var(--bg-card)', borderRadius: 'var(--radius)', padding: '0 20px', overflowX: 'auto' }}>
           <div style={{ display: 'grid', gridTemplateColumns: COL, gap: 10, padding: '9px 4px', borderBottom: '2px solid var(--border)', minWidth: 760 }}>
-            {['Name', 'Institution', 'Type', 'Balance', 'Source', 'Status', ''].map((h, i) => (
+            {['Name', 'Institution', 'Type', 'Balance', 'Role', 'Source', 'Status', ''].map((h, i) => (
               <div key={i} style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-tertiary)' }}>{h}</div>
             ))}
           </div>
@@ -254,6 +284,7 @@ function AccountSection({ label, accounts, duplicateIds, updateField, deactivate
                 <div style={{ fontSize: 13, fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: a.balance < 0 ? 'var(--red)' : 'var(--accent-text)' }}>
                   {money(a.balance)}
                 </div>
+                <RoleSelect a={a} role={roleOf(a)} setAccountRole={setAccountRole} />
                 <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
                   {a.simplefin_id ? 'SimpleFin' : 'Manual'}
                 </span>
@@ -282,20 +313,62 @@ export default function Accounts({ active }) {
   const [manualLoans, setManualLoans] = useState([])
   const [showInactive, setShowInactive] = useState(false)
   const [addAnchor, setAddAnchor] = useState(null)
+  const [roles, setRoles] = useState({ bills: '', food: '' })
   const isMobile = useIsMobile()
+
+  const [csvAccountId, setCsvAccountId] = useState('')
+  const [csvFile, setCsvFile] = useState(null)
+  const [csvImporting, setCsvImporting] = useState(false)
+  const [csvResult, setCsvResult] = useState(null)
+  const [csvError, setCsvError] = useState(null)
 
   const load = useCallback(async () => {
     try {
-      const [data, loans] = await Promise.all([
+      const [data, loans, settings] = await Promise.all([
         fetch(`${API}/accounts?include_inactive=true`).then(r => r.json()),
         fetch(`${API}/loans`).then(r => r.json()),
+        fetch(`${API}/settings`).then(r => r.json()),
       ])
       setAccounts(Array.isArray(data) ? data : [])
       setManualLoans(Array.isArray(loans) ? loans : [])
+      setRoles({ bills: settings.bills_account_id || '', food: settings.food_account_id || '' })
     } catch {}
   }, [])
 
   useEffect(() => { if (active) load() }, [active, load])
+
+  const roleOf = a => String(roles.bills) === String(a.id) ? 'bills'
+    : String(roles.food) === String(a.id) ? 'food' : ''
+
+  async function setAccountRole(accountId, roleKey) {
+    // A role belongs to exactly one account: assigning it here removes it from
+    // wherever it was; clearing ('') just removes this account's role.
+    const next = { ...roles }
+    for (const rk of ['bills', 'food']) {
+      if (String(next[rk]) === String(accountId)) next[rk] = ''
+    }
+    if (roleKey) next[roleKey] = String(accountId)
+    setRoles(next)
+    await Promise.all([
+      fetch(`${API}/settings/bills_account_id`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value: next.bills }) }),
+      fetch(`${API}/settings/food_account_id`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value: next.food }) }),
+    ]).catch(() => {})
+  }
+
+  async function importCsv() {
+    if (!csvAccountId || !csvFile) return
+    setCsvImporting(true); setCsvResult(null); setCsvError(null)
+    const form = new FormData()
+    form.append('file', csvFile)
+    try {
+      const r = await fetch(`${API}/import/csv?account_id=${csvAccountId}`, { method: 'POST', body: form })
+      const d = await r.json()
+      if (!r.ok) throw new Error(d.detail || 'Import failed')
+      setCsvResult(d)
+      load()
+    } catch (e) { setCsvError(e.message) }
+    finally { setCsvImporting(false) }
+  }
 
   async function updateField(id, field, value) {
     setAccounts(prev => prev.map(a => a.id === id ? { ...a, [field]: value } : a))
@@ -377,6 +450,8 @@ export default function Accounts({ active }) {
           reactivate={reactivate}
           isMobile={isMobile}
           manualLoans={cat.label === 'Loans' ? manualLoans : []}
+          roleOf={roleOf}
+          setAccountRole={setAccountRole}
         />
       ))}
       <AccountSection
@@ -387,7 +462,64 @@ export default function Accounts({ active }) {
         deactivate={deactivate}
         reactivate={reactivate}
         isMobile={isMobile}
+        roleOf={roleOf}
+        setAccountRole={setAccountRole}
       />
+
+      {/* CSV import — lives here because history is imported into an account */}
+      <div className="apple-card" style={{ padding: '24px 28px', marginTop: 10 }}>
+        <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6, letterSpacing: '-0.02em' }}>Import Transactions (CSV)</div>
+        <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 18 }}>
+          Import historical transactions from a USAA or Chase CSV export into one of the accounts above.
+          Duplicates are automatically skipped.
+        </div>
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 14 }}>
+          <div>
+            <div className="apple-label" style={{ marginBottom: 6 }}>Account</div>
+            <select className="apple-select" value={csvAccountId}
+              onChange={e => { setCsvAccountId(e.target.value); setCsvResult(null); setCsvError(null) }}>
+              <option value="">— select account —</option>
+              {accounts.filter(a => a.is_active).map(a => <option key={a.id} value={a.id}>{a.display_name || a.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="apple-label" style={{ marginBottom: 6 }}>CSV File</div>
+            <input type="file" accept=".csv"
+              onChange={e => { setCsvFile(e.target.files[0] || null); setCsvResult(null); setCsvError(null) }}
+              style={{ fontSize: 13, color: 'var(--text-primary)', padding: '6px 0' }} />
+          </div>
+          <button className="apple-btn-primary" onClick={importCsv}
+            disabled={csvImporting || !csvAccountId || !csvFile} style={{ fontSize: 13 }}>
+            {csvImporting ? 'Importing…' : 'Import CSV'}
+          </button>
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginBottom: 4 }}>
+          USAA: Date, Description, Original Description, Category, Amount, Balance · Chase: Transaction Date, Post Date, Description, Category, Type, Amount, Memo
+        </div>
+        {csvError && (
+          <div style={{ background: 'rgba(255,59,48,0.08)', border: '1px solid rgba(255,59,48,0.2)',
+            borderRadius: 10, padding: '10px 14px', fontSize: 13, color: 'var(--red)', marginTop: 10 }}>
+            {csvError}
+          </div>
+        )}
+        {csvResult && (
+          <div style={{ background: 'rgba(52,199,89,0.08)', border: '1px solid rgba(52,199,89,0.25)',
+            borderRadius: 10, padding: '10px 14px', fontSize: 13, color: 'var(--accent-text)', marginTop: 10 }}>
+            {csvResult.imported} transaction{csvResult.imported !== 1 ? 's' : ''} imported
+            {', '}{csvResult.skipped} duplicate{csvResult.skipped !== 1 ? 's' : ''} skipped
+            {csvResult.format && (
+              <span style={{ color: 'var(--text-tertiary)', marginLeft: 8 }}>
+                ({csvResult.format.toUpperCase()} format)
+              </span>
+            )}
+            {csvResult.errors?.length > 0 && (
+              <div style={{ marginTop: 8, color: 'var(--red)', fontSize: 12 }}>
+                {csvResult.errors.map((e, i) => <div key={i}>{e}</div>)}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       {addAnchor && <AddAccountModal anchor={addAnchor} onClose={() => setAddAnchor(null)} onSave={load} />}
     </div>

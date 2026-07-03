@@ -221,6 +221,183 @@ function BudgetSuggestModal({ suggestions, onApply, onClose }) {
   )
 }
 
+// Memory lives here — on the page where conversations happen — not in Settings.
+// Facts are injected into every session; sessions are saved when you clear a chat.
+function MemoryPanel() {
+  const [facts, setFacts] = useState([])
+  const [sessions, setSessions] = useState([])
+  const [total, setTotal] = useState(0)
+  const [loading, setLoading] = useState(false)
+  const [editingFact, setEditingFact] = useState(null)
+  const [expandedSession, setExpandedSession] = useState(null)
+  const [transcript, setTranscript] = useState(null)
+  const [clearConfirm, setClearConfirm] = useState(null)
+
+  async function load() {
+    setLoading(true)
+    try {
+      const [memR, sessR] = await Promise.all([
+        fetch(`${API}/ai/memory`).then(r => r.json()),
+        fetch(`${API}/ai/memory/sessions?limit=20`).then(r => r.json()),
+      ])
+      setFacts(memR.facts || [])
+      setSessions(sessR.sessions || [])
+      setTotal(sessR.total || 0)
+    } catch {}
+    finally { setLoading(false) }
+  }
+
+  useEffect(() => { load() }, [])
+
+  async function deleteFact(id) {
+    await fetch(`${API}/ai/memory/facts/${id}`, { method: 'DELETE' })
+    setFacts(prev => prev.filter(f => f.id !== id))
+  }
+
+  async function saveEditedFact(id, fact, category) {
+    await fetch(`${API}/ai/memory/facts/${id}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fact, category }),
+    })
+    setFacts(prev => prev.map(f => f.id === id ? { ...f, fact, category } : f))
+    setEditingFact(null)
+  }
+
+  async function clearMemory(type) {
+    if (type === 'facts' || type === 'all') await fetch(`${API}/ai/memory/facts`, { method: 'DELETE' })
+    if (type === 'sessions' || type === 'all') await fetch(`${API}/ai/memory/sessions`, { method: 'DELETE' })
+    setClearConfirm(null)
+    load()
+  }
+
+  async function loadTranscript(id) {
+    if (expandedSession === id) { setExpandedSession(null); setTranscript(null); return }
+    setExpandedSession(id)
+    try {
+      const d = await fetch(`${API}/ai/memory/sessions/${id}/transcript`).then(r => r.json())
+      setTranscript(d.transcript || [])
+    } catch { setTranscript([]) }
+  }
+
+  return (
+    <div className="apple-card" style={{ padding: '16px 20px', marginBottom: 12, flexShrink: 0, maxHeight: 380, overflowY: 'auto' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+          {facts.length} fact{facts.length !== 1 ? 's' : ''} · {total} session{total !== 1 ? 's' : ''} stored
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="apple-btn-secondary" onClick={load} disabled={loading} style={{ fontSize: 12 }}>
+            {loading ? 'Loading…' : 'Refresh'}
+          </button>
+          <button className="apple-btn-secondary" onClick={() => setClearConfirm('all')} style={{ fontSize: 12, color: 'var(--red)' }}>
+            Clear All
+          </button>
+        </div>
+      </div>
+
+      {clearConfirm && (
+        <div style={{ padding: '12px 16px', background: 'rgba(255,59,48,0.06)', border: '1px solid rgba(255,59,48,0.2)', borderRadius: 10, marginBottom: 16 }}>
+          <div style={{ fontSize: 13, marginBottom: 10 }}>
+            {clearConfirm === 'all' ? 'Delete all facts and conversation history?' : clearConfirm === 'facts' ? 'Delete all stored facts?' : 'Delete all conversation history?'}
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="apple-btn-danger" onClick={() => clearMemory(clearConfirm)} style={{ fontSize: 12 }}>Yes, delete</button>
+            <button className="apple-btn-secondary" onClick={() => setClearConfirm(null)} style={{ fontSize: 12 }}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* Facts */}
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>Facts the assistant remembers</div>
+          {facts.length > 0 && (
+            <button className="apple-btn-secondary" onClick={() => setClearConfirm('facts')} style={{ fontSize: 11, color: 'var(--red)' }}>Clear Facts</button>
+          )}
+        </div>
+        {facts.length === 0 && (
+          <div style={{ fontSize: 13, color: 'var(--text-tertiary)', fontStyle: 'italic' }}>
+            No facts yet — they build up as you chat.
+          </div>
+        )}
+        {facts.map(f => (
+          <div key={f.id}>
+            {editingFact?.id === f.id ? (
+              <div style={{ padding: '8px 0' }}>
+                <input className="apple-input" value={editingFact.fact} onChange={e => setEditingFact(p => ({ ...p, fact: e.target.value }))} style={{ marginBottom: 6 }} />
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <select className="apple-select" value={editingFact.category} onChange={e => setEditingFact(p => ({ ...p, category: e.target.value }))} style={{ fontSize: 12 }}>
+                    {['general','goal','preference','person','account'].map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                  <button className="apple-btn-primary" onClick={() => saveEditedFact(f.id, editingFact.fact, editingFact.category)} style={{ fontSize: 12 }}>Save</button>
+                  <button className="apple-btn-secondary" onClick={() => setEditingFact(null)} style={{ fontSize: 12 }}>Cancel</button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
+                <div style={{ flex: 1 }}>
+                  <span style={{ fontSize: 13, color: 'var(--text-primary)' }}>{f.fact}</span>
+                  <span style={{ fontSize: 11, color: 'var(--text-tertiary)', marginLeft: 8 }}>{f.category}</span>
+                </div>
+                <button onClick={() => setEditingFact({ id: f.id, fact: f.fact, category: f.category })} style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 6, cursor: 'pointer', fontSize: 11, padding: '2px 8px', color: 'var(--text-secondary)', fontFamily: 'inherit' }}>Edit</button>
+                <button onClick={() => deleteFact(f.id)} style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 6, cursor: 'pointer', fontSize: 11, padding: '2px 8px', color: 'var(--red)', fontFamily: 'inherit' }}>✕</button>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Session history */}
+      <div style={{ paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>Past conversations</div>
+          {sessions.length > 0 && (
+            <button className="apple-btn-secondary" onClick={() => setClearConfirm('sessions')} style={{ fontSize: 11, color: 'var(--red)' }}>Clear History</button>
+          )}
+        </div>
+        {sessions.length === 0 && (
+          <div style={{ fontSize: 13, color: 'var(--text-tertiary)', fontStyle: 'italic' }}>
+            No sessions yet — conversations are saved when you clear the chat.
+          </div>
+        )}
+        {sessions.map(s => (
+          <div key={s.id} style={{ borderBottom: '1px solid var(--border)' }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 0', cursor: 'pointer' }}
+              onClick={() => loadTranscript(s.id)}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 3 }}>
+                  {s.ended_at?.slice(0, 16).replace('T', ' ')} · {s.message_count} messages
+                </div>
+                <div style={{ fontSize: 13, color: 'var(--text-primary)', lineHeight: 1.5 }}>
+                  {s.summary || <span style={{ fontStyle: 'italic', color: 'var(--text-tertiary)' }}>No summary</span>}
+                </div>
+              </div>
+              <span style={{ fontSize: 12, color: 'var(--text-tertiary)', flexShrink: 0, marginTop: 2 }}>
+                {expandedSession === s.id ? '▲' : '▼'}
+              </span>
+            </div>
+            {expandedSession === s.id && transcript && (
+              <div style={{ padding: '0 0 12px 0' }}>
+                {transcript.map((m, i) => (
+                  <div key={i} style={{ marginBottom: 8, padding: '8px 12px', background: m.role === 'user' ? 'rgba(var(--accent-rgb,0,122,255),0.08)' : 'var(--bg-subtle)', borderRadius: 8 }}>
+                    <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginBottom: 3, textTransform: 'uppercase', fontWeight: 600 }}>{m.role}</div>
+                    <div style={{ fontSize: 12, color: 'var(--text-primary)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{m.content}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+        {total > 20 && (
+          <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 8 }}>
+            Showing 20 of {total} sessions
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function SavePromptModal({ onSave, onClose }) {
   const [text, setText] = useState('')
   function save() {
@@ -259,6 +436,7 @@ export default function AI({ active }) {
   const [temperature, setTemperature] = useState(0.7)
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_SYSTEM_PROMPT)
   const [showSettings, setShowSettings] = useState(false)
+  const [showMemory, setShowMemory] = useState(false)
   const [streamingText, setStreamingText] = useState('')
   const [sessionStartedAt] = useState(new Date().toISOString())
   const [pendingAction, setPendingAction] = useState(null)
@@ -591,6 +769,9 @@ Transactions: ${JSON.stringify(context.recent_transactions || [], null, 2)}`
           <button className="apple-btn-secondary" onClick={runBudgetSuggest} disabled={suggesting} style={{ fontSize: 12 }}>
             {suggesting ? '⏳ Analyzing…' : '💡 Suggest Budgets'}
           </button>
+          <button className="apple-btn-secondary" onClick={() => setShowMemory(s => !s)} style={{ fontSize: 12 }}>
+            ◐ Memory
+          </button>
           <button className="apple-btn-secondary" onClick={() => setShowSettings(s => !s)} style={{ fontSize: 12 }}>
             ⚙ Settings
           </button>
@@ -601,6 +782,9 @@ Transactions: ${JSON.stringify(context.recent_transactions || [], null, 2)}`
           )}
         </div>
       </div>
+
+      {/* Inline memory panel */}
+      {showMemory && <MemoryPanel />}
 
       {/* Inline settings panel */}
       {showSettings && (

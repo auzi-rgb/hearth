@@ -417,6 +417,11 @@ export default function Spending({ active }) {
   // since each one needs individual attention rather than aggregate breakdown.
   const [viewingUncategorized, setViewingUncategorized] = useState(false)
 
+  // Auto-category rules are created on this page (via "apply to merchant"),
+  // so they're managed here too — not in Settings.
+  const [merchantRules, setMerchantRules] = useState([])
+  const [showRules, setShowRules] = useState(false)
+
   const [dropdown, setDropdown] = useState(null)
   const [budgetAnchor, setBudgetAnchor] = useState(null)
   const [editCatsAnchor, setEditCatsAnchor] = useState(null)
@@ -464,12 +469,26 @@ export default function Spending({ active }) {
 
   useEffect(() => {
     if (!active) return
-    fetch(`${API}/accounts`).then(r => r.json()).then(a => {
+    Promise.all([
+      fetch(`${API}/accounts`).then(r => r.json()),
+      fetch(`${API}/settings`).then(r => r.json()).catch(() => ({})),
+    ]).then(([a, settings]) => {
       setAccounts(a)
-      const food = a.find(x => x.name.toLowerCase().includes('food'))
+      // Default filter to the Food role account (set on the Accounts page);
+      // name matching is only the legacy fallback.
+      const byRole = settings.food_account_id && a.find(x => String(x.id) === String(settings.food_account_id))
+      const food = byRole || a.find(x => x.name.toLowerCase().includes('food'))
       if (food && !accountId) setAccountId(String(food.id))
     }).catch(() => {})
+    fetch(`${API}/merchant-rules`).then(r => r.json()).then(setMerchantRules).catch(() => {})
   }, [active])
+
+  async function deleteMerchantRule(id) {
+    try {
+      await fetch(`${API}/merchant-rules/${id}`, { method: 'DELETE' })
+      setMerchantRules(r => r.filter(x => x.id !== id))
+    } catch {}
+  }
 
   // Reset drill when date range or account changes
   useEffect(() => {
@@ -1036,6 +1055,45 @@ export default function Spending({ active }) {
           )
         })}
       </div>
+
+      {/* Auto-category rules — created on this page via "apply to merchant", managed here too */}
+      {merchantRules.length > 0 && (
+        <div className="apple-card" style={{ padding: '20px 24px', marginTop: 16 }}>
+          <div onClick={() => setShowRules(s => !s)}
+            style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}>
+            <div>
+              <div style={{ fontSize: 15, fontWeight: 600, letterSpacing: '-0.02em' }}>
+                Auto-Category Rules
+                <span style={{ fontSize: 12, fontWeight: 400, color: 'var(--text-tertiary)', marginLeft: 8 }}>
+                  {merchantRules.length} rule{merchantRules.length !== 1 ? 's' : ''}
+                </span>
+              </div>
+              {!showRules && (
+                <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
+                  Created when you pick a category and choose "apply to merchant" — applied to every future sync
+                </div>
+              )}
+            </div>
+            <span style={{ fontSize: 12, color: 'var(--text-tertiary)', transform: showRules ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}>▼</span>
+          </div>
+          {showRules && (
+            <div style={{ marginTop: 12, borderTop: '1px solid var(--border)' }}>
+              {merchantRules.map(rule => (
+                <div key={rule.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
+                  <div style={{ minWidth: 0 }}>
+                    <span style={{ fontSize: 13, fontWeight: 500 }}>{rule.pattern}</span>
+                    <span style={{ fontSize: 12, color: 'var(--text-secondary)', marginLeft: 10, textTransform: 'capitalize' }}>→ {rule.category}</span>
+                  </div>
+                  <button onClick={() => deleteMerchantRule(rule.id)}
+                    style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 6, cursor: 'pointer', fontSize: 11, padding: '2px 8px', color: 'var(--red)', fontFamily: 'inherit', flexShrink: 0 }}>
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {budgetAnchor && <BudgetModal anchor={budgetAnchor} categories={primaries.map(p => p.name)} budgets={budgets} onClose={() => setBudgetAnchor(null)} onSaved={loadSummaryData} />}
       {editCatsAnchor && <EditCategoriesPanel anchor={editCatsAnchor} primaries={primaries} onClose={() => setEditCatsAnchor(null)} onRefresh={loadSummaryData} />}

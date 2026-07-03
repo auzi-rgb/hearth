@@ -102,9 +102,9 @@ monthly_payment, payments_made, total_payments, start_date
 **`settings`** — key-value store. Keys in use:
 - `jwt_secret`, `simplefin_access_url` (both hidden from GET /api/settings and blocked from PUT)
 - `household_members` — **JSON list** of `{key, label, payroll_keywords[], amount_min, amount_max, default_frequency}`; seeded on startup from `sync.DEFAULT_HOUSEHOLD`; edited in Settings → Household. Drives paycheck detection/attribution. (Session 6 — replaced hardcoded names/employers/pay-ranges.)
-- `bills_account_id`, `food_account_id` — explicit account roles for the Dashboard (Session 6). Empty = legacy fallback of matching "bills"/"food" in the account name (`find_role_account` in main.py).
+- `bills_account_id`, `food_account_id` — explicit account roles, set via Role selector on each account card (Accounts page). Empty = legacy fallback of matching "bills"/"food" in the account name (`find_role_account` in main.py).
 - `payday_dow_{member_key}`, `payday_frequency_{member_key}`, `payday_anchor_{member_key}`
-- `low_balance_threshold`, `safe_spend_buffer`
+- `safe_spend_buffer` — edited inline on the Dashboard's "Bills buffer" row; also drives Calendar red-day coloring. (`low_balance_threshold` retired in Session 7 — the static threshold banner was superseded by the cash-flow simulation's `overdraft_warnings`.)
 - `ai_default_model`, `ai_system_prompt`, `ai_temperature`, `ai_autorun`, `ai_autorun_prompt`
 - TMRS keys: `tmrs_account_balance`, `tmrs_your_contributions`, `tmrs_interest`, `tmrs_city_contributions`, `tmrs_monthly_deposit`, `tmrs_retirement_eligible_date`
   (previous versions of this file listed different TMRS key names — these are the real ones)
@@ -125,8 +125,8 @@ Other tables: `budgets`, `merchant_rules`, `categories` (primary/secondary taxon
 - `POST /api/accounts/{id}/reactivate` · `PUT /api/accounts/{id}/nickname` · `PUT /api/accounts/{id}/type` · `PUT /api/accounts/{id}/debt-details`
 
 ### Dashboard & Calendar
-- `GET /api/dashboard` — balances, net worth, upcoming bills, payday projections per household member (`next_income` = `{<member_key>: …, soonest: …}`), day-by-day cash-flow simulation, `overdraft_warnings`, `suggested_transfer`. Fields `encumbered_30d`, `recommended_transfer`, `spendable_in_food` are **dead stubs always returning 0** (nothing in the frontend reads them).
-- `GET /api/calendar?month=YYYY-MM`
+- `GET /api/dashboard` — balances, net worth, upcoming bills, payday projections per household member (`next_income` = `{<member_key>: …, soonest: …}`), day-by-day cash-flow simulation, `overdraft_warnings`, `suggested_transfer`. Fields `encumbered_30d`, `recommended_transfer`, `spendable_in_food` are **dead stubs always returning 0** (nothing in the frontend reads them). Session 7 removed `spendable`, `safe_to_spend`, `low_balance_warning`, `low_balance_threshold` — the simulation's `overdraft_warnings` is the only warning source.
+- `GET /api/calendar?month=YYYY-MM` — returns `safe_spend_buffer` (not the retired threshold) for running-balance coloring
 
 ### Bills
 - `GET /api/bills` — computed: `next_due`, `days_until`, `rolling_min/max`, `paid_this_month`, `monthly_equivalent` (weekly×52/12), `linked_name`
@@ -175,7 +175,13 @@ Dashboard, Overview, Accounts, Calendar, Spending, Budget, Bills, Debt, About, A
 
 `src/lib/dashboardFields.js` — shared getters for dashboard payload fields displayed on multiple pages (currently `getMonthlyIncome`). Add a getter there for any field more than one page reads.
 
-Settings page sections: SimpleFin, AI Assistant, AI Memory, Dashboard (threshold/buffer), **Household** (members, payroll keywords, pay ranges — Session 6), **Account Roles** (Bills/Food account pickers — Session 6), Paycheck Schedule (per member, dynamic), CSV Import, Auto-Category Rules, Change Password.
+### Information architecture rule (Session 7)
+**Setup lives in Settings; daily-use controls live on the page that uses them.** When adding a new control, place it by that rule:
+- **Settings** is a hub of cards → sub-pages (`view` state in Settings.jsx; breadcrumb rendered in App.jsx's title strip via the `onCrumb` prop): **Connections** (SimpleFin) · **AI Assistant** (model/persona/temperature/auto-run/context) · **Household** (members + payroll keywords + pay ranges + per-member pay schedule, one Save) · **Security** (password)
+- **Accounts** — Role selector on each checking/savings card (Bills/Food, exclusive; writes `bills_account_id`/`food_account_id`) + CSV Import card
+- **Spending** — Auto-Category Rules card (rules are created here via "apply to merchant"); account filter defaults to the Food-role account
+- **Assistant** — ◐ Memory toolbar button → inline MemoryPanel (facts, sessions, clear)
+- **Dashboard** — safe-spend buffer edited inline on the "Bills buffer" row
 
 ---
 
@@ -226,3 +232,4 @@ Day-by-day simulation of bills out / paychecks in over 60 days; `safe_today` = l
 | 3–4 | ~2026-06-06 | Debt set-bill wiring, Dashboard 3-card rewrite |
 | 5 | 2026-06-14 | Bills.jsx rewrite, Overview Loans/TMRS UI, deploy path fix |
 | 6 | 2026-07-03 | QC review: git repo + .gitignore, pinned requirements.txt, nightly DB backups, nickname/display_name migrations, configurable household (Settings → Household), explicit Bills/Food account roles, payroll detection tied to configured paydays, this file audited & rewritten |
+| 7 | 2026-07-03 | UX root-cause pass: retired the Gen-1 low-balance threshold banner (message displayed a different number than it tested; simulation `overdraft_warnings` is the only warning now), Settings rebuilt as hub + sub-pages with clickable breadcrumbs, setup-vs-use IA (roles/CSV → Accounts, rules → Spending, memory → Assistant, buffer inline on Dashboard), paycheck attribution learns from recent actual amounts in DB |

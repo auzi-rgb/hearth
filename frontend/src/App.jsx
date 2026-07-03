@@ -36,6 +36,10 @@ export default function App() {
   const [debtExtra, setDebtExtra] = useState(0)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [budgetAlert, setBudgetAlert] = useState(false)
+  // Breadcrumb for pages with internal sub-navigation (currently Settings).
+  // {label, onBack} — rendered in the top title strip; clicking the parent
+  // crumb calls onBack to return to that page's hub view.
+  const [crumb, setCrumb] = useState(null)
 
   useEffect(() => {
     function onUnauthorized() { setAuthed(false) }
@@ -44,7 +48,7 @@ export default function App() {
   }, [])
 
   function logout() { clearToken(); setAuthed(false) }
-  function navigate(id) { setPage(id); setDrawerOpen(false) }
+  function navigate(id) { setPage(id); setDrawerOpen(false); setCrumb(null) }
 
   if (!authed) return <Login onLogin={() => setAuthed(true)} />
 
@@ -223,9 +227,22 @@ export default function App() {
           >
             ☰
           </button>
-          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', letterSpacing: '-0.02em' }}>
-            {activeTab?.label}
-          </span>
+          {page === 'settings' && crumb ? (
+            <span style={{ fontSize: 13, letterSpacing: '-0.02em' }}>
+              <span
+                onClick={() => crumb.onBack?.()}
+                style={{ color: 'var(--blue)', cursor: 'pointer', fontWeight: 500 }}
+              >
+                Settings
+              </span>
+              <span style={{ color: 'var(--text-tertiary)', margin: '0 6px' }}>/</span>
+              <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{crumb.label}</span>
+            </span>
+          ) : (
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', letterSpacing: '-0.02em' }}>
+              {activeTab?.label}
+            </span>
+          )}
           {page === 'budget' && (
             <span style={{ fontSize: 12, color: 'var(--text-tertiary)', fontWeight: 400 }}>
               {new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
@@ -251,7 +268,7 @@ export default function App() {
           {pane('bills',     <Bills     active={page === 'bills'}     />)}
           {pane('about',     <About     active={page === 'about'}     navigate={navigate} />)}
           {pane('ai',        <AI        active={page === 'ai'}        />)}
-          {pane('settings',  <Settings  active={page === 'settings'}  />)}
+          {pane('settings',  <Settings  active={page === 'settings'}  onCrumb={setCrumb} />)}
         </div>
       </div>
 

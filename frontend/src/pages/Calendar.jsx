@@ -194,8 +194,8 @@ export default function Calendar({ active }) {
     return null
   }
 
-  // ── Running balance ──
-  const threshold    = data?.low_balance_threshold ?? 500
+  // ── Running balance ── (red when a projected day dips below the safe-spend buffer)
+  const threshold    = data?.safe_spend_buffer ?? 200
   const dailyBalance = {}
   if (showBalance && data) {
     let bal = data.bills_account_balance || 0
