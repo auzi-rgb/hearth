@@ -61,6 +61,102 @@ const MERCHANT_PALETTE = ['#60a5fa','#34d399','#fbbf24','#f87171','#a78bfa','#fb
 // Two steps: pick a primary, then (if it has any) pick or create a secondary
 // within it. A primary with no secondaries (Gas, Bill, Debt Payment, ...)
 // applies immediately, same as before.
+// "Add as bill" — link a bank transaction to a bill (existing or new). One
+// action fixes three things: the bill gains a merchant pattern so its payment
+// history matches, a merchant rule categorizes the merchant as 'bill' forever,
+// and every existing matching transaction is recategorized out of living spend.
+function BillLinkPanel({ txn, bills, onDone, onClose }) {
+  const [mode, setMode] = useState('existing') // 'existing' | 'new'
+  const [billId, setBillId] = useState('')
+  const [name, setName] = useState('')
+  const [payType, setPayType] = useState('Recurring')
+  const [saving, setSaving] = useState(false)
+  const [result, setResult] = useState(null)
+  const [error, setError] = useState(null)
+
+  async function submit() {
+    setSaving(true); setError(null)
+    try {
+      const body = { transaction_id: txn.id }
+      if (mode === 'existing') {
+        if (!billId) { setError('Pick a bill'); setSaving(false); return }
+        body.bill_id = parseInt(billId, 10)
+      } else {
+        if (name.trim()) body.name = name.trim()
+        body.payment_type = payType
+      }
+      const r = await fetch(`${API}/bills/link-transaction`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const d = await r.json()
+      if (!r.ok) throw new Error(d.detail || 'Link failed')
+      setResult(d)
+      setTimeout(() => { onDone() }, 1600)
+    } catch (e) { setError(e.message) }
+    finally { setSaving(false) }
+  }
+
+  if (result) {
+    return (
+      <div style={{ padding: '12px 14px', margin: '4px 0 10px', background: 'rgba(52,199,89,0.08)',
+        border: '1px solid rgba(52,199,89,0.25)', borderRadius: 10, fontSize: 13, color: 'var(--accent-text)' }}>
+        ✓ Linked as "{result.pattern}" — {result.recategorized} transaction{result.recategorized !== 1 ? 's' : ''} recategorized
+        as bill{result.created ? ', new bill created' : ''}. Future syncs handle this merchant automatically.
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ padding: '12px 14px', margin: '4px 0 10px', background: 'var(--bg-subtle)',
+      borderRadius: 10, border: '1px solid var(--border)' }}>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+        {[['existing', 'Link to existing bill'], ['new', 'Create new bill']].map(([m, label]) => (
+          <button key={m} onClick={() => setMode(m)} style={{
+            fontSize: 12, fontFamily: 'inherit', cursor: 'pointer', padding: '4px 12px', borderRadius: 6,
+            border: '1px solid ' + (mode === m ? 'var(--accent)' : 'var(--border)'),
+            background: mode === m ? 'var(--accent)' : 'none',
+            color: mode === m ? '#fff' : 'var(--text-secondary)', fontWeight: mode === m ? 600 : 400,
+          }}>{label}</button>
+        ))}
+        <button onClick={onClose} style={{ marginLeft: 'auto', background: 'none', border: 'none',
+          cursor: 'pointer', color: 'var(--text-tertiary)', fontSize: 13, fontFamily: 'inherit' }}>✕</button>
+      </div>
+      {mode === 'existing' ? (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <select className="apple-select" value={billId} onChange={e => setBillId(e.target.value)} style={{ fontSize: 12, flex: 1, minWidth: 180 }}>
+            <option value="">— pick the bill this pays —</option>
+            {bills.map(b => (
+              <option key={b.id} value={b.id}>
+                {(b.linked_name || b.display_name || b.name).slice(0, 40)} · ${Number(b.expected_amount).toFixed(0)}
+              </option>
+            ))}
+          </select>
+          <button className="apple-btn-primary" onClick={submit} disabled={saving || !billId} style={{ fontSize: 12 }}>
+            {saving ? '…' : 'Link'}
+          </button>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <input className="apple-input" placeholder="Bill name" value={name}
+            onChange={e => setName(e.target.value)} style={{ fontSize: 12, flex: 1, minWidth: 140 }} />
+          <select className="apple-select" value={payType} onChange={e => setPayType(e.target.value)} style={{ fontSize: 12 }}>
+            <option value="Recurring">Monthly Bill</option>
+            <option value="Contribution">Contribution</option>
+          </select>
+          <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
+            ${Math.abs(txn.amount).toFixed(2)} on day {new Date(txn.transaction_date + 'T12:00:00').getDate()}
+          </span>
+          <button className="apple-btn-primary" onClick={submit} disabled={saving} style={{ fontSize: 12 }}>
+            {saving ? '…' : 'Create & link'}
+          </button>
+        </div>
+      )}
+      {error && <div style={{ fontSize: 12, color: 'var(--red)', marginTop: 8 }}>{error}</div>}
+    </div>
+  )
+}
+
 function InlineCatPicker({ txn, primaries, customCats, onApply, onClose, onCategoryCreated }) {
   const [step, setStep] = useState('primary') // 'primary' | 'secondary'
   const [pendingPrimary, setPendingPrimary] = useState(null)
@@ -422,6 +518,11 @@ export default function Spending({ active }) {
   const [merchantRules, setMerchantRules] = useState([])
   const [showRules, setShowRules] = useState(false)
 
+  // "Add as bill" flow — which transaction's link panel is open, and the
+  // active bills to link against.
+  const [billLinkTxn, setBillLinkTxn] = useState(null)
+  const [allBills, setAllBills] = useState([])
+
   const [dropdown, setDropdown] = useState(null)
   const [budgetAnchor, setBudgetAnchor] = useState(null)
   const [editCatsAnchor, setEditCatsAnchor] = useState(null)
@@ -481,6 +582,7 @@ export default function Spending({ active }) {
       if (food && !accountId) setAccountId(String(food.id))
     }).catch(() => {})
     fetch(`${API}/merchant-rules`).then(r => r.json()).then(setMerchantRules).catch(() => {})
+    fetch(`${API}/bills`).then(r => r.json()).then(b => setAllBills(Array.isArray(b) ? b : [])).catch(() => {})
   }, [active])
 
   async function deleteMerchantRule(id) {
@@ -1038,6 +1140,18 @@ export default function Spending({ active }) {
                           flexShrink: 0,
                         }}>?</span>
                     )}
+                    <button
+                      onClick={() => { setBillLinkTxn(billLinkTxn?.id === t.id ? null : t); setDropdown(null) }}
+                      title="This is a recurring bill — link it to a bill line item (or create one) so it's tracked as an obligation, not living spend"
+                      style={{
+                        padding: '1px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600,
+                        background: billLinkTxn?.id === t.id ? '#3B82F6' : 'none',
+                        border: '1px dashed ' + (billLinkTxn?.id === t.id ? '#3B82F6' : 'var(--border)'),
+                        cursor: 'pointer', fontFamily: 'inherit',
+                        color: billLinkTxn?.id === t.id ? '#fff' : 'var(--text-tertiary)',
+                      }}>
+                      + bill
+                    </button>
                   </div>
                 </div>
                 <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--red)', marginLeft: 12 }}>
@@ -1049,6 +1163,19 @@ export default function Spending({ active }) {
                   txn={t} primaries={primaries} customCats={customCats}
                   onApply={applyCategory} onClose={() => setDropdown(null)}
                   onCategoryCreated={loadSummaryData}
+                />
+              )}
+              {billLinkTxn?.id === t.id && (
+                <BillLinkPanel
+                  txn={t}
+                  bills={allBills}
+                  onClose={() => setBillLinkTxn(null)}
+                  onDone={() => {
+                    setBillLinkTxn(null)
+                    loadTxns()
+                    loadSummaryData()
+                    fetch(`${API}/bills`).then(r => r.json()).then(b => setAllBills(Array.isArray(b) ? b : [])).catch(() => {})
+                  }}
                 />
               )}
             </div>

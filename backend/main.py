@@ -228,6 +228,14 @@ def init_db():
         conn.commit()
     except Exception:
         pass
+    try:
+        # Explicit merchant text linking a bill to its bank transactions — set by
+        # the Spending page's "add as bill" flow. When present, it replaces the
+        # fragile name[:8] LIKE matching for history/creep/rolling stats.
+        conn.execute("ALTER TABLE bills ADD COLUMN merchant_pattern TEXT")
+        conn.commit()
+    except Exception:
+        pass
     conn.execute("UPDATE bills SET frequency = 'monthly' WHERE frequency IS NULL")
     conn.commit()
     # One-time reclassification: savings/investment transfers that were entered
@@ -510,6 +518,23 @@ def _normalize_merchant(description: str) -> str:
     d = re.sub(r'\b\d{4,}\b', '', d)
     words = [w for w in d.split() if len(w) >= 3 and not w.isdigit()]
     return words[0][:20] if words else ""
+
+def _bill_match_term(bill) -> str:
+    """The LIKE term connecting a bill to its transactions: the explicit
+    merchant_pattern when the household linked one, else the legacy name prefix."""
+    return bill["merchant_pattern"] or bill["name"][:8]
+
+def _bill_pattern_from_desc(description: str) -> str:
+    """Pick the most distinctive merchant token from a bank description —
+    'RO HEALTH GETROMAN.COM NY' → 'getroman', not the generic 'health'.
+    Longest word wins because bank noise words (POS, ACH, city names) are short."""
+    d = re.sub(r'[^\w\s]', ' ', (description or "").lower())
+    d = re.sub(r'\b\d{3,}\b', '', d)
+    words = [w for w in d.split() if len(w) >= 4 and not w.isdigit()]
+    if words:
+        return max(words, key=len)[:24]
+    fallback = _normalize_merchant(description)
+    return fallback or (description or "").strip().lower()[:20]
 
 def _clean_bill_name(description: str) -> str:
     d = description.strip()
@@ -1711,8 +1736,8 @@ async def list_bills():
         if b["confidence"] == "estimated" and b["account_id"]:
             three_months_ago = (today - timedelta(days=90)).isoformat()
             txns = conn.execute(
-                "SELECT amount FROM transactions WHERE account_id=? AND transaction_date >= ? AND description LIKE ? ORDER BY transaction_date DESC LIMIT 3",
-                (b["account_id"], three_months_ago, f"%{b['name'][:8]}%")
+                "SELECT amount FROM transactions WHERE account_id=? AND transaction_date >= ? AND LOWER(description) LIKE ? ORDER BY transaction_date DESC LIMIT 3",
+                (b["account_id"], three_months_ago, f"%{_bill_match_term(b).lower()}%")
             ).fetchall()
             amounts = [abs(t["amount"]) for t in txns]
             if amounts:
@@ -2395,6 +2420,75 @@ async def income_summary(months: int = 6):
         "months_in_average": len(totals),
     }
 
+# ── Link a spending transaction to a bill ─────────────────────────────────────
+
+@router.post("/api/bills/link-transaction")
+async def link_transaction_to_bill(request: Request):
+    """Connect a bank transaction to a bill — either an existing one (bill_id)
+    or a new bill created from the transaction. Does three things at once:
+    sets the bill's merchant_pattern (so history/creep/rolling stats match),
+    adds a merchant rule mapping the pattern to the 'bill' category (so future
+    syncs never count it as living spend), and recategorizes every existing
+    matching transaction the same way."""
+    body = await request.json()
+    txn_id = body.get("transaction_id")
+    if not txn_id:
+        raise HTTPException(status_code=400, detail="transaction_id required")
+    conn = get_db()
+    txn = conn.execute("SELECT * FROM transactions WHERE id=?", (txn_id,)).fetchone()
+    if not txn:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Transaction not found")
+
+    pattern = (body.get("pattern") or "").strip().lower() or _bill_pattern_from_desc(txn["description"] or "")
+    if not pattern:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Could not derive a merchant pattern from this transaction")
+
+    created = False
+    bill_id = body.get("bill_id")
+    if bill_id:
+        bill = conn.execute("SELECT id FROM bills WHERE id=?", (bill_id,)).fetchone()
+        if not bill:
+            conn.close()
+            raise HTTPException(status_code=404, detail="Bill not found")
+    else:
+        txn_day = None
+        try:
+            txn_day = min(28, date.fromisoformat(txn["transaction_date"]).day)
+        except (ValueError, TypeError):
+            pass
+        cur = conn.execute(
+            "INSERT INTO bills (name, expected_amount, confidence, day_of_month, account_id, payment_type, from_debt_budget, is_active) VALUES (?,?,?,?,?,?,0,1)",
+            (
+                body.get("name") or _clean_bill_name(txn["description"] or "New Bill"),
+                abs(float(txn["amount"])),
+                body.get("confidence", "fixed"),
+                body.get("day_of_month") or txn_day,
+                txn["account_id"],
+                body.get("payment_type", "Recurring"),
+            )
+        )
+        bill_id = cur.lastrowid
+        created = True
+
+    conn.execute(
+        "UPDATE bills SET merchant_pattern=?, account_id=COALESCE(account_id, ?) WHERE id=?",
+        (pattern, txn["account_id"], bill_id)
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO merchant_rules (pattern, category, created_at) VALUES (?, 'bill', ?)",
+        (pattern, datetime.now().isoformat())
+    )
+    recat = conn.execute(
+        "UPDATE transactions SET category='bill', category_confirmed=1 WHERE LOWER(description) LIKE ?",
+        (f"%{pattern}%",)
+    )
+    conn.commit()
+    recategorized = recat.rowcount
+    conn.close()
+    return {"bill_id": bill_id, "created": created, "pattern": pattern, "recategorized": recategorized}
+
 # ── Transfers (Bills → Food) ──────────────────────────────────────────────────
 
 @router.get("/api/transfers")
@@ -2461,8 +2555,8 @@ async def bill_creep():
         if not b["account_id"] or b["frequency"] == "weekly" or float(b["expected_amount"]) <= 0:
             continue
         txns = conn.execute(
-            "SELECT amount, transaction_date FROM transactions WHERE account_id=? AND transaction_date >= ? AND amount < 0 AND description LIKE ? ORDER BY transaction_date DESC LIMIT 3",
-            (b["account_id"], since, f"%{b['name'][:8]}%")
+            "SELECT amount, transaction_date FROM transactions WHERE account_id=? AND transaction_date >= ? AND amount < 0 AND LOWER(description) LIKE ? ORDER BY transaction_date DESC LIMIT 3",
+            (b["account_id"], since, f"%{_bill_match_term(b).lower()}%")
         ).fetchall()
         if not txns:
             continue
@@ -2690,8 +2784,8 @@ async def bill_history():
         if not b["account_id"]:
             continue
         txns = conn.execute(
-            "SELECT * FROM transactions WHERE account_id=? AND transaction_date >= ? AND description LIKE ? ORDER BY transaction_date DESC LIMIT 6",
-            (b["account_id"], since, f"%{b['name'][:8]}%")
+            "SELECT * FROM transactions WHERE account_id=? AND transaction_date >= ? AND LOWER(description) LIKE ? ORDER BY transaction_date DESC LIMIT 6",
+            (b["account_id"], since, f"%{_bill_match_term(b).lower()}%")
         ).fetchall()
         result.append({"bill": dict(b), "history": [{"date": t["transaction_date"], "amount": abs(fmt_money(t["amount"]))} for t in txns]})
     conn.close()
