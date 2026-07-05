@@ -315,8 +315,14 @@ export default function About({ active, navigate }) {
   )
   const budgeted = useMemo(() => budgets.reduce((s, b) => s + (parseFloat(b.monthly_limit) || 0), 0), [budgets])
   const spentSoFar = useMemo(() => budgets.reduce((s, b) => s + (parseFloat(b.spent) || 0), 0), [budgets])
-  // Savings goal — same field Budget.jsx's IncomeSummary deducts before "Available".
-  const savings = useMemo(() => parseFloat(budgets.find(b => b.category === 'savings')?.monthly_limit) || 0, [budgets])
+  // Savings band = Contribution bills (real scheduled transfers to HYSA/Roth/529)
+  // plus any budget savings goal. Contributions are the chosen, adjustable tier.
+  const contribBills = useMemo(
+    () => bills.filter(b => b.payment_type === 'Contribution').reduce((s, b) => s + (b.monthly_equivalent ?? b.expected_amount ?? 0), 0),
+    [bills]
+  )
+  const savingsGoal = useMemo(() => parseFloat(budgets.find(b => b.category === 'savings')?.monthly_limit) || 0, [budgets])
+  const savings = contribBills + savingsGoal
   const available = Math.max(0, income - fixedBills - debtBills - savings)
 
   const billRows = useMemo(() => bills.filter(b => b.payment_type === 'Recurring')
@@ -455,12 +461,17 @@ export default function About({ active, navigate }) {
             )}
             {zoomed === 'savings' && (
               <DetailList
-                title={`Savings — ${money(savings)}/mo goal`}
-                sub="Your savings target, set on the Budget tab — not a transaction category, so it never shows real spending."
-                rows={savings > 0 ? [["Savings goal", money(savings), "monthly target"]] : []}
-                emptyText="No savings goal set yet — this band grows the day the debt band hits zero."
-                onJump={() => navigate?.('budget')}
-                jumpLabel="Go to Budget →"
+                title={`Savings — ${money(savings)}/mo`}
+                sub="Contribution bills (scheduled transfers to savings/investment accounts) plus any budget savings goal. The chosen tier — adjust here before living money gets squeezed."
+                rows={[
+                  ...bills.filter(b => b.payment_type === 'Contribution')
+                    .sort((a, b) => (b.monthly_equivalent ?? b.expected_amount ?? 0) - (a.monthly_equivalent ?? a.expected_amount ?? 0))
+                    .map(b => [b.display_name || b.name, money(b.monthly_equivalent ?? b.expected_amount), b.next_due ? `next ${b.next_due}` : '']),
+                  ...(savingsGoal > 0 ? [["Budget savings goal", money(savingsGoal), "monthly target"]] : []),
+                ]}
+                emptyText="No contributions yet — this band grows the day the debt band hits zero."
+                onJump={() => navigate?.('bills')}
+                jumpLabel="Go to Bills →"
               />
             )}
             {zoomed === 'budget' && (

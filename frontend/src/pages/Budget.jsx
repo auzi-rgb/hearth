@@ -147,8 +147,8 @@ const Sep = () => (
   <div style={{ width: 1, height: 28, background: 'var(--border)', margin: '0 16px', flexShrink: 0 }} />
 )
 
-function IncomeSummary({ income, actualIncome, fixedTotal, savingsTotal, allocatedTotal, onSuggest }) {
-  const availableToBudget = income - fixedTotal - savingsTotal
+function IncomeSummary({ income, actualIncome, fixedTotal, contribTotal, savingsTotal, allocatedTotal, onSuggest }) {
+  const availableToBudget = income - fixedTotal - contribTotal - savingsTotal
   const surplus = availableToBudget - allocatedTotal
   const over = surplus < 0
   // Meaningful gap between this month's actual paychecks and the baseline —
@@ -177,10 +177,20 @@ function IncomeSummary({ income, actualIncome, fixedTotal, savingsTotal, allocat
         </div>
       )}
       <Sep />
-      <Chip label="Fixed Bills" value={`− ${money(fixedTotal)}`} color="var(--text-secondary)" />
+      <Chip label="Bills + Debt" value={`− ${money(fixedTotal)}`} color="var(--text-secondary)" />
       <Sep />
-      <Chip label="Savings" value={`− ${money(savingsTotal)}`} color="var(--text-secondary)" />
-      <Sep />
+      {contribTotal > 0 && (
+        <>
+          <Chip label="Contributions" value={`− ${money(contribTotal)}`} color="#10B981" />
+          <Sep />
+        </>
+      )}
+      {savingsTotal > 0 && (
+        <>
+          <Chip label="Savings Goal" value={`− ${money(savingsTotal)}`} color="var(--text-secondary)" />
+          <Sep />
+        </>
+      )}
       <Chip label="Available" value={money(Math.max(0, availableToBudget))}
         color={availableToBudget < 0 ? 'var(--red)' : 'var(--text-primary)'} />
       <Sep />
@@ -482,6 +492,7 @@ export default function Budget({ active, onAlert, navigateTo }) {
   // "two sources of truth" bug this page already burned us on once.
   const [income, setIncome] = useState(0)
   const [actualIncome, setActualIncome] = useState(0)
+  const [squeezeInfo, setSqueezeInfo] = useState(null)
 
   // Real categories — source of truth: GET /api/categories. primaries carries
   // each primary's secondaries (for the click-to-expand breakdown); base/custom
@@ -608,6 +619,7 @@ export default function Budget({ active, onAlert, navigateTo }) {
       const dash = await fetch(`${API}/dashboard`).then(r => r.json())
       setIncome(getBaselineIncome(dash))
       setActualIncome(getMonthlyIncome(dash))
+      setSqueezeInfo({ left: dash.left_to_live, living: dash.actual_living_median, gap: dash.living_squeeze })
     } catch {}
   }, [])
 
@@ -750,10 +762,13 @@ export default function Budget({ active, onAlert, navigateTo }) {
   // Source of truth: bills DB. Sum monthly_equivalent, not expected_amount — same
   // convention as the weekly-bill conversion 30 lines up, so this total agrees with
   // every other page that totals bills instead of silently under/over-counting weeklies.
-  const fixedTotal = bills.reduce((s, b) => s + (b.monthly_equivalent ?? b.expected_amount ?? 0), 0)
+  // Hardline (bills + debt payments) and Contributions are separate lines —
+  // contributions are the adjustable tier, never mixed into "fixed."
+  const fixedTotal = bills.filter(b => b.payment_type !== 'Contribution').reduce((s, b) => s + (b.monthly_equivalent ?? b.expected_amount ?? 0), 0)
+  const contribTotal = bills.filter(b => b.payment_type === 'Contribution').reduce((s, b) => s + (b.monthly_equivalent ?? b.expected_amount ?? 0), 0)
   const savingsTotal = limits['savings'] || 0
   const allocatedTotal = allCategoryNames.filter(n => n !== 'savings').reduce((s, n) => s + (limits[n] || 0), 0)
-  const remainingAfterAll = income - fixedTotal - savingsTotal - allocatedTotal
+  const remainingAfterAll = income - fixedTotal - contribTotal - savingsTotal - allocatedTotal
 
   // ── Render ───────────────────────────────────────────────────────────────────
 
@@ -781,10 +796,26 @@ export default function Budget({ active, onAlert, navigateTo }) {
           income={income}
           actualIncome={actualIncome}
           fixedTotal={fixedTotal}
+          contribTotal={contribTotal}
           savingsTotal={savingsTotal}
           allocatedTotal={allocatedTotal}
           onSuggest={suggestAllocation}
         />
+        {squeezeInfo?.gap != null && squeezeInfo.gap < 0 && (
+          <div style={{
+            background: 'rgba(255,59,48,0.07)', border: '1px solid rgba(255,59,48,0.3)',
+            borderRadius: 12, padding: '12px 16px', marginTop: 10, fontSize: 13, lineHeight: 1.55,
+          }}>
+            <span style={{ fontWeight: 600, color: 'var(--red)' }}>
+              ⚠ Over-committed by {money(Math.abs(squeezeInfo.gap))}/mo.
+            </span>{' '}
+            <span style={{ color: 'var(--text-secondary)' }}>
+              After bills, debt, and contributions, the plan leaves {money(squeezeInfo.left)} to live on — but you
+              actually live on ~{money(squeezeInfo.living)}. The gap goes onto credit cards at interest. Reduce
+              Contributions (Bills page) before cutting anything you eat.
+            </span>
+          </div>
+        )}
       </div>
 
       {/* 3. My Budget Categories */}

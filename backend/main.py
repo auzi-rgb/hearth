@@ -230,6 +230,19 @@ def init_db():
         pass
     conn.execute("UPDATE bills SET frequency = 'monthly' WHERE frequency IS NULL")
     conn.commit()
+    # One-time reclassification: savings/investment transfers that were entered
+    # as Recurring bills become Contributions — chosen allocations, not hardline
+    # obligations. New ones get the type picked in the bill modal; this only
+    # catches the ones created before the type existed. Idempotent.
+    conn.execute("""
+        UPDATE bills SET payment_type='Contribution'
+        WHERE payment_type='Recurring' AND (
+            LOWER(name) LIKE '%roth%' OR LOWER(name) LIKE '%hysa%'
+            OR LOWER(name) LIKE '%529%' OR LOWER(name) LIKE '%high-yield%'
+            OR LOWER(name) LIKE '%high yield%'
+        )
+    """)
+    conn.commit()
     try:
         conn.execute("ALTER TABLE transactions ADD COLUMN is_transfer INTEGER NOT NULL DEFAULT 0")
         conn.commit()
@@ -779,9 +792,13 @@ def compute_baseline_income(conn) -> dict:
     for m in get_household(conn):
         freq = get_setting(conn, f"payday_frequency_{m['key']}", m.get("default_frequency") or "biweekly")
         usual = 4 if freq == "weekly" else 2
+        # 4-check window: recent enough that a raise becomes the new baseline
+        # within a couple of cycles (an 8-check window kept old pay rates in
+        # the median for months), still wide enough that one odd check can't
+        # move the median.
         amts = [
             float(r["actual_amount"]) for r in conn.execute(
-                "SELECT actual_amount FROM paychecks WHERE person=? AND actual_amount IS NOT NULL ORDER BY actual_date DESC LIMIT 8",
+                "SELECT actual_amount FROM paychecks WHERE person=? AND actual_amount IS NOT NULL ORDER BY actual_date DESC LIMIT 4",
                 (m["key"],)
             ).fetchall()
         ]
@@ -1327,13 +1344,18 @@ async def dashboard():
     food_account = find_role_account(conn, "food", "food")
     food_balance = get_account_balance(conn, food_account["id"]) if food_account else 0.0
 
-    # Monthly bills: full monthly obligation across all active bills.
-    # Weekly bills (e.g. an accelerated card payoff) are converted to a monthly equivalent.
-    all_active_bills = conn.execute("SELECT expected_amount, frequency FROM bills WHERE is_active=1").fetchall()
-    monthly_bills_total = sum(
-        float(b["expected_amount"]) * (52 / 12) if b["frequency"] == "weekly" else float(b["expected_amount"])
-        for b in all_active_bills
-    )
+    # Monthly obligations split by commitment tier. Weekly bills are converted
+    # to a monthly equivalent. Hardline (must-pay bills + debt payments) is a
+    # different kind of number than Contributions (chosen savings/investment
+    # transfers) — only the sum leaves the account the same way.
+    all_active_bills = conn.execute("SELECT expected_amount, frequency, payment_type FROM bills WHERE is_active=1").fetchall()
+    def _meq(b):
+        return float(b["expected_amount"]) * (52 / 12) if b["frequency"] == "weekly" else float(b["expected_amount"])
+    bills_recurring_total = sum(_meq(b) for b in all_active_bills if (b["payment_type"] or "Recurring") == "Recurring")
+    debt_payments_total = sum(_meq(b) for b in all_active_bills if b["payment_type"] in ("Loan", "Debt"))
+    contributions_total = sum(_meq(b) for b in all_active_bills if b["payment_type"] == "Contribution")
+    hardline_total = bills_recurring_total + debt_payments_total
+    monthly_bills_total = hardline_total + contributions_total
 
     monthly_surplus = monthly_income - monthly_bills_total
 
@@ -1403,6 +1425,24 @@ async def dashboard():
     _baseline = compute_baseline_income(conn)
     income_vs_baseline = round(monthly_income - _baseline["baseline_income"], 2)
 
+    # The squeeze guard: baseline − hardline − contributions = what the plan
+    # leaves to live on. Compare against what the household ACTUALLY lives on
+    # (median of recent complete months' discretionary spending). A negative
+    # squeeze means contributions are over-committed and the gap lands on
+    # credit cards — whose interest rate beats any savings yield, so the app
+    # must surface this before the household feels it.
+    left_to_live = round(_baseline["baseline_income"] - hardline_total - contributions_total, 2)
+    _living_rows = conn.execute(
+        """SELECT strftime('%Y-%m', transaction_date) as m, ABS(SUM(amount)) as t
+           FROM transactions WHERE amount < 0 AND is_transfer=0 AND is_pending=0
+             AND (category IS NULL OR category NOT IN ('bill', 'debt_payment'))
+             AND strftime('%Y-%m', transaction_date) < ?
+           GROUP BY m ORDER BY m DESC LIMIT 3""",
+        (today.strftime("%Y-%m"),)
+    ).fetchall()
+    actual_living_median = round(statistics.median([float(r["t"]) for r in _living_rows]), 2) if _living_rows else None
+    living_squeeze = round(left_to_live - actual_living_median, 2) if actual_living_median is not None else None
+
     # Data freshness — safe-to-transfer is only actionable if balances are fresh
     _sync_row = conn.execute(
         "SELECT synced_at FROM sync_log WHERE status='ok' ORDER BY synced_at DESC LIMIT 1"
@@ -1463,6 +1503,13 @@ async def dashboard():
         "days_until_paycheck": days_until_paycheck,
         "monthly_income": fmt_money(monthly_income),
         "monthly_bills_total": fmt_money(monthly_bills_total),
+        "bills_hardline_total": fmt_money(hardline_total),
+        "bills_recurring_total": fmt_money(bills_recurring_total),
+        "debt_payments_total": fmt_money(debt_payments_total),
+        "contributions_total": fmt_money(contributions_total),
+        "left_to_live": fmt_money(left_to_live),
+        "actual_living_median": actual_living_median,
+        "living_squeeze": living_squeeze,
         "monthly_surplus": fmt_money(monthly_surplus),
         "suggested_transfer": fmt_money(suggested_transfer),
         "baseline_income": _baseline["baseline_income"],
@@ -1507,6 +1554,25 @@ async def calendar_data(month: str = None):
     bills = conn.execute("SELECT * FROM bills WHERE is_active=1").fetchall()
     bill_events = []
     for b in bills:
+        # Weekly bills (e.g. an accelerated card payment) occur several times a
+        # month — draw every occurrence, or the bill is invisible on the one
+        # page where people look for "what's due when."
+        if b["frequency"] == "weekly" and b["day_of_week"] is not None:
+            for occ in weekly_occurrences(b["day_of_week"], start, end):
+                bill_events.append({
+                    "id":         b["id"],
+                    "date":       occ.isoformat(),
+                    "type":       "bill",
+                    "name":       b["name"],
+                    "amount":     fmt_money(b["expected_amount"]),
+                    "confidence": b["confidence"],
+                    "bill_type":  b["bill_type"],
+                    "weekly":     True,
+                    # One paid-mark can't represent several occurrences, so
+                    # weekly bills never show as paid (same rule as dashboard)
+                    "paid":       False,
+                })
+            continue
         if b["day_of_month"]:
             try:
                 d = date(year, mon, b["day_of_month"])

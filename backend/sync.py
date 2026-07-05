@@ -493,6 +493,9 @@ async def generate_coach_briefing() -> dict:
         ctx["baseline_monthly_income"] = d.get("baseline_income")
         ctx["this_month_income_vs_baseline"] = d.get("income_vs_baseline")
         ctx["true_surplus_above_typical_transfer"] = (d.get("sweep_suggestion") or {}).get("amount")
+        ctx["plan_leaves_to_live_on"] = d.get("left_to_live")
+        ctx["actual_monthly_living_cost"] = d.get("actual_living_median")
+        ctx["living_squeeze"] = d.get("living_squeeze")
     except Exception:
         pass
 
@@ -514,6 +517,7 @@ Field meanings (be precise about these):
 - safe_to_transfer_today: from a day-by-day simulation that already reserves money for every upcoming bill in the next 60 days, INCLUDING bills early next month. When advising what is free to move, spend, or send at debt, use THIS number and only this number. Never reason from "income minus bills for the month" — a paycheck landing near month-end usually funds the next month's first bills, and calling it extra money is a mistake this household has explicitly asked you not to make.
 - baseline_monthly_income: what a NORMAL month brings in — the number their budget is built on. this_month_income_vs_baseline above zero means an extra-paycheck month; that extra is handled by the cash-flow simulation, not the budget, so do not suggest changing budget categories because of it.
 - true_surplus_above_typical_transfer: if present, this is genuinely free money — the simulation reserved everything first. This is the ONLY number you may ever call surplus.
+- living_squeeze: plan_leaves_to_live_on minus actual_monthly_living_cost. If NEGATIVE, the household's savings/investment contributions are over-committed: the shortfall will end up on credit cards, whose interest rate exceeds any savings yield. In that case your single most important advice is to reduce contributions until the squeeze clears — never suggest cutting food or essentials to protect a contribution.
 
 Today's numbers:
 {json.dumps(ctx, indent=1)}"""

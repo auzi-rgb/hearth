@@ -11,10 +11,23 @@ function money(v) {
 }
 
 const TYPE_BADGE = {
-  Recurring: { label: 'Recurring', bg: '#3B82F6' },
-  Loan:      { label: 'Loan',      bg: '#8B5CF6' },
-  Debt:      { label: 'Debt',      bg: '#F59E0B' },
+  Recurring:    { label: 'Recurring',    bg: '#3B82F6' },
+  Loan:         { label: 'Loan',         bg: '#8B5CF6' },
+  Debt:         { label: 'Debt',         bg: '#F59E0B' },
+  Contribution: { label: 'Contribution', bg: '#10B981' },
 }
+
+// Commitment tiers. Monthly Bills + Debt Payoff = the hardline (must be paid).
+// Contributions are chosen transfers — the adjustable tier, and the first
+// place to cut when the plan squeezes living money onto credit cards.
+const BILL_GROUPS = [
+  { title: 'Monthly Bills', types: ['Recurring'], color: '#3B82F6',
+    desc: 'Obligations — these must be paid.' },
+  { title: 'Debt Payoff', types: ['Loan', 'Debt'], color: '#F59E0B',
+    desc: 'Minimums plus chosen extra. Monthly Bills + Debt Payoff = your hardline.' },
+  { title: 'Contributions', types: ['Contribution'], color: '#10B981',
+    desc: 'Chosen transfers to savings and investments — adjust these first if living money gets tight.' },
+]
 
 function TypeBadge({ type }) {
   const cfg = TYPE_BADGE[type] || TYPE_BADGE.Recurring
@@ -75,7 +88,7 @@ function BillModal({ bill, loans, debtAccounts, allBills, onClose, onSaved }) {
       // Loan <-> Debt is just a label change at that point — a credit card edited here
       // still carries its link from the Debt tab's "Set as Bill" flow, and switching
       // the dropdown between Loan/Debt views of the same link must not erase it.
-      if (k === 'payment_type' && v === 'Recurring') { next.linked_loan_id = null; next.linked_account_id = null }
+      if (k === 'payment_type' && (v === 'Recurring' || v === 'Contribution')) { next.linked_loan_id = null; next.linked_account_id = null }
       return next
     })
   }
@@ -116,8 +129,8 @@ function BillModal({ bill, loans, debtAccounts, allBills, onClose, onSaved }) {
         day_of_month:    parseInt(form.day_of_month),
         confidence:      form.confidence,
         notes:           form.notes.trim() || null,
-        linked_loan_id:    finalPaymentType !== 'Recurring' ? (form.linked_loan_id || null) : null,
-        linked_account_id: finalPaymentType !== 'Recurring' ? (form.linked_account_id || null) : null,
+        linked_loan_id:    (finalPaymentType === 'Loan' || finalPaymentType === 'Debt') ? (form.linked_loan_id || null) : null,
+        linked_account_id: (finalPaymentType === 'Loan' || finalPaymentType === 'Debt') ? (form.linked_account_id || null) : null,
       }
       const url    = isEdit ? `${API}/bills/${bill.id}` : `${API}/bills`
       const method = isEdit ? 'PUT' : 'POST'
@@ -186,6 +199,7 @@ function BillModal({ bill, loans, debtAccounts, allBills, onClose, onSaved }) {
                 <option value="Recurring">Recurring</option>
                 <option value="Loan">Loan</option>
                 <option value="Debt">Debt</option>
+                <option value="Contribution">Contribution</option>
               </select>
             </div>
             <div>
@@ -310,10 +324,14 @@ export default function Bills({ active }) {
   const [editBill, setEditBill] = useState(undefined) // undefined=closed, null=new, obj=edit
   const [creep, setCreep] = useState(null)
   const [showAnnual, setShowAnnual] = useState(false)
+  const [squeeze, setSqueeze] = useState(null)
 
   const load = useCallback(() => {
     fetch(`${API}/bills`).then(r => r.json()).then(setBills).catch(() => {})
     fetch(`${API}/bills/creep`).then(r => r.json()).then(setCreep).catch(() => {})
+    fetch(`${API}/dashboard`).then(r => r.json())
+      .then(d => setSqueeze({ left: d.left_to_live, living: d.actual_living_median, gap: d.living_squeeze }))
+      .catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -381,10 +399,17 @@ export default function Bills({ active }) {
           </div>
         </div>
         <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' }}>
+          <div>
+            <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-primary)', marginBottom: 2 }}>Hardline</div>
+            <div style={{ fontSize: 15, fontWeight: 700, fontVariantNumeric: 'tabular-nums', color: 'var(--text-primary)' }}>
+              {money((byType.Recurring || 0) + (byType.Loan || 0) + (byType.Debt || 0))}
+            </div>
+          </div>
           {[
             { key: 'Recurring', color: '#3B82F6' },
             { key: 'Loan',      color: '#8B5CF6' },
             { key: 'Debt',      color: '#F59E0B' },
+            { key: 'Contribution', color: '#10B981' },
           ].filter(({ key }) => byType[key] > 0).map(({ key, color }) => (
             <div key={key}>
               <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color, marginBottom: 2 }}>{key}</div>
@@ -409,6 +434,22 @@ export default function Bills({ active }) {
           )}
         </div>
       </div>
+
+      {/* Squeeze guard — contributions eating the money you actually live on */}
+      {squeeze?.gap != null && squeeze.gap < 0 && (
+        <div style={{
+          background: 'rgba(255,59,48,0.07)', border: '1px solid rgba(255,59,48,0.3)',
+          borderRadius: 12, padding: '14px 18px', marginBottom: 16,
+        }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--red)', marginBottom: 4 }}>
+            ⚠ The plan leaves {money(squeeze.left)}/mo to live on — you actually live on ~{money(squeeze.living)}
+          </div>
+          <div style={{ fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.55 }}>
+            That {money(Math.abs(squeeze.gap))} gap ends up on credit cards, where interest costs more than any
+            savings account earns. Trim the Contributions section below before touching food or essentials.
+          </div>
+        </div>
+      )}
 
       {/* Bill creep — recent payments drifting above the expected amount */}
       {creep?.drifting?.length > 0 && (
@@ -462,8 +503,22 @@ export default function Bills({ active }) {
           </div>
         ) : (
           <>
-            <TableHeader />
-            {sorted.map(bill => {
+            {BILL_GROUPS.map(group => {
+            const rows = sorted.filter(b => group.types.includes(b.payment_type || 'Recurring'))
+            if (rows.length === 0) return null
+            const subtotal = rows.reduce((s, b) => s + (b.monthly_equivalent ?? b.expected_amount ?? 0), 0)
+            return (
+              <div key={group.title} style={{ marginBottom: 10 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', padding: '14px 4px 2px' }}>
+                  <span style={{ fontSize: 12, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: group.color }}>
+                    {group.title}
+                    <span style={{ fontWeight: 400, color: 'var(--text-tertiary)', textTransform: 'none', letterSpacing: 0, marginLeft: 8 }}>{rows.length}</span>
+                  </span>
+                  <span style={{ fontSize: 13, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{money(subtotal)}/mo</span>
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-tertiary)', padding: '0 4px 6px' }}>{group.desc}</div>
+                <TableHeader />
+                {rows.map(bill => {
               if (deleteId === bill.id) {
                 return (
                   <div key={bill.id} style={{ display: 'flex', alignItems: 'center', gap: 12,
@@ -575,6 +630,9 @@ export default function Bills({ active }) {
                   </button>
                 </div>
               )
+                })}
+              </div>
+            )
             })}
           </>
         )}
