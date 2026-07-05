@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Depends, APIRouter
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
@@ -924,6 +924,97 @@ async def change_password(request: Request):
     conn.close()
     return {"status": "ok"}
 
+# ── iCal feed — token auth (calendar apps can't send JWT headers) ────────────
+
+@app.get("/api/calendar.ics")
+async def calendar_ics(token: str = ""):
+    """Subscribe-able calendar of the next 90 days: bill due dates, paydays,
+    and transfer days. Secured by a long random token in the URL instead of
+    JWT, because Apple/Google Calendar subscriptions can only do plain GETs."""
+    conn = get_db()
+    real = get_setting(conn, "ical_token")
+    if not real or token != real:
+        conn.close()
+        raise HTTPException(status_code=403, detail="Invalid calendar token")
+
+    today = date.today()
+    horizon = today + timedelta(days=90)
+    lines = [
+        "BEGIN:VCALENDAR", "VERSION:2.0",
+        "PRODID:-//Hearth//Home Finance//EN",
+        "X-WR-CALNAME:Hearth", "X-WR-CALDESC:Bills, paydays, and transfer days",
+    ]
+
+    def add_event(uid, d, summary):
+        lines.extend([
+            "BEGIN:VEVENT",
+            f"UID:{uid}@hearth.local",
+            f"DTSTAMP:{today.strftime('%Y%m%dT000000Z')}",
+            f"DTSTART;VALUE=DATE:{d.strftime('%Y%m%d')}",
+            f"SUMMARY:{summary}",
+            "END:VEVENT",
+        ])
+
+    for b in conn.execute("SELECT * FROM bills WHERE is_active=1").fetchall():
+        nm = (b["display_name"] or b["name"])[:40].replace(",", " ").replace(";", " ")
+        amt = f"${float(b['expected_amount']):.2f}"
+        prefix = "Contribution" if b["payment_type"] == "Contribution" else "Bill"
+        if b["frequency"] == "weekly" and b["day_of_week"] is not None:
+            for occ in weekly_occurrences(b["day_of_week"], today, horizon):
+                add_event(f"bill{b['id']}-{occ}", occ, f"{prefix}: {nm} {amt}")
+        elif b["day_of_month"]:
+            for k in range(4):
+                y = today.year + (today.month - 1 + k) // 12
+                mth = (today.month - 1 + k) % 12 + 1
+                last = cal_mod.monthrange(y, mth)[1]
+                occ = date(y, mth, min(b["day_of_month"], last))
+                if today <= occ <= horizon:
+                    add_event(f"bill{b['id']}-{occ}", occ, f"{prefix}: {nm} {amt}")
+
+    for m in get_household(conn):
+        info = detect_next_payday(conn, m["key"])
+        if info.get("next_date"):
+            dd = date.fromisoformat(info["next_date"])
+            label = (m.get("label") or m["key"].capitalize())
+            while dd <= horizon:
+                add_event(f"pay-{m['key']}-{dd}", dd, f"Payday: {label}")
+                dd += timedelta(weeks=info.get("interval_weeks", 2))
+
+    try:
+        _sched = json.loads(get_setting(conn, "transfer_schedule") or "{}")
+    except (ValueError, TypeError):
+        _sched = {}
+    if _sched.get("mode") != "payday":
+        try:
+            _days = sorted({int(x) for x in _sched.get("days", [1, 15]) if 1 <= int(x) <= 28}) or [1, 15]
+        except (ValueError, TypeError):
+            _days = [1, 15]
+        for k in range(4):
+            y = today.year + (today.month - 1 + k) // 12
+            mth = (today.month - 1 + k) % 12 + 1
+            for dd_num in _days:
+                try:
+                    occ = date(y, mth, dd_num)
+                except ValueError:
+                    continue
+                if today <= occ <= horizon:
+                    add_event(f"xfer-{occ}", occ, "Transfer day: Bills → Food")
+    conn.close()
+
+    lines.append("END:VCALENDAR")
+    return PlainTextResponse("\r\n".join(lines), media_type="text/calendar")
+
+@router.get("/api/calendar/ical-url")
+async def calendar_ical_url():
+    """Returns the tokened subscribe path, minting the token on first use."""
+    conn = get_db()
+    token = get_setting(conn, "ical_token")
+    if not token:
+        token = secrets.token_urlsafe(24)
+        set_setting(conn, "ical_token", token)
+    conn.close()
+    return {"path": f"/hearth/api/calendar.ics?token={token}"}
+
 # ── AI chat — rate-limited, auth via router dep ───────────────────────────────
 
 GATEWAY_URL = "https://10.0.0.24/gateway/api"
@@ -1592,6 +1683,7 @@ async def calendar_data(month: str = None):
                     "amount":     fmt_money(b["expected_amount"]),
                     "confidence": b["confidence"],
                     "bill_type":  b["bill_type"],
+                    "payment_type": b["payment_type"] or "Recurring",
                     "weekly":     True,
                     # One paid-mark can't represent several occurrences, so
                     # weekly bills never show as paid (same rule as dashboard)
@@ -1612,6 +1704,7 @@ async def calendar_data(month: str = None):
                 "amount":     fmt_money(b["expected_amount"]),
                 "confidence": b["confidence"],
                 "bill_type":  b["bill_type"],
+                "payment_type": b["payment_type"] or "Recurring",
                 "paid":       b["id"] in paid_set,
             })
     pay_rows = conn.execute(
@@ -1671,7 +1764,96 @@ async def calendar_data(month: str = None):
     bills_acct = find_role_account(conn, "bills", "bills")
     bills_bal     = get_account_balance(conn, bills_acct["id"]) if bills_acct else 0.0
     safe_buffer = float(get_setting(conn, "safe_spend_buffer", "200"))
+
+    _today = date.today()
+    cur_month = _today.strftime("%Y-%m")
+
+    # Expected income for the month — honest full-month figure, not just what's
+    # landed so far (the old summary bar compared received-so-far income against
+    # full-month bills and produced a meaningless negative net).
+    if month == cur_month:
+        expected_income = compute_month_income(conn)["monthly_income"]
+    elif month < cur_month:
+        expected_income = round(sum((p["amount"] or 0) for p in pay_events if not p.get("projected")), 2)
+    else:
+        expected_income = compute_baseline_income(conn)["baseline_income"]
+
+    # Transfer days: recorded transfers + upcoming scheduled days this month
+    transfer_events = [
+        {"date": r["transfer_date"], "amount": fmt_money(r["amount"]), "recorded": True}
+        for r in conn.execute(
+            "SELECT transfer_date, amount FROM transfers WHERE transfer_date >= ? AND transfer_date <= ? ORDER BY transfer_date",
+            (start.isoformat(), end.isoformat())
+        ).fetchall()
+    ]
+    try:
+        _sched = json.loads(get_setting(conn, "transfer_schedule") or "{}")
+    except (ValueError, TypeError):
+        _sched = {}
+    if _sched.get("mode") == "payday":
+        sched_dates = sorted({p["date"] for p in pay_events if p.get("projected")})
+    else:
+        try:
+            _days = sorted({int(x) for x in _sched.get("days", [1, 15]) if 1 <= int(x) <= 28}) or [1, 15]
+        except (ValueError, TypeError):
+            _days = [1, 15]
+        sched_dates = []
+        for dd in _days:
+            try:
+                sched_dates.append(date(year, mon, dd).isoformat())
+            except ValueError:
+                pass
+    _recorded_dates = {e["date"] for e in transfer_events}
+    for sd in sched_dates:
+        if sd >= _today.isoformat() and sd not in _recorded_dates:
+            transfer_events.append({"date": sd, "amount": None, "recorded": False})
+    transfer_events.sort(key=lambda e: e["date"])
+
+    # "Looks paid" suggestions: unpaid monthly bills with a matching transaction
+    # near the due date. Suggestion only — paid status stays a human decision.
+    paid_suggestions = []
+    for b in bills:
+        if b["frequency"] == "weekly" or not b["day_of_month"] or b["id"] in paid_set:
+            continue
+        try:
+            due = date(year, mon, b["day_of_month"])
+        except ValueError:
+            due = date(year, mon, cal_mod.monthrange(year, mon)[1])
+        term = _bill_match_term(b).lower()
+        # Amount must be in the right ballpark too — a $2.41 fee at the same
+        # merchant is not the $25 bill payment.
+        _tol = max(5.0, float(b["expected_amount"]) * 0.2)
+        m_txn = conn.execute(
+            """SELECT transaction_date, amount FROM transactions
+               WHERE amount < 0 AND LOWER(description) LIKE ?
+                 AND ABS(ABS(amount) - ?) <= ?
+                 AND ABS(julianday(transaction_date) - julianday(?)) <= 5
+               ORDER BY ABS(julianday(transaction_date) - julianday(?)) LIMIT 1""",
+            (f"%{term}%", float(b["expected_amount"]), _tol, due.isoformat(), due.isoformat())
+        ).fetchone()
+        if m_txn:
+            paid_suggestions.append({
+                "bill_id": b["id"],
+                "due_date": due.isoformat(),
+                "txn_date": m_txn["transaction_date"],
+                "amount": fmt_money(abs(m_txn["amount"])),
+            })
     conn.close()
+
+    # Simulation overlay — only meaningful for the current month (it starts
+    # from today's balances). Same data the Dashboard's safe-to-transfer uses,
+    # so the Calendar's balance line can never disagree with it.
+    sim_timeline = []
+    low_point = None
+    suggested_transfer = None
+    if month == cur_month:
+        _dash = await dashboard()
+        sim_timeline = _dash.get("cash_flow_timeline") or []
+        suggested_transfer = _dash.get("suggested_transfer")
+        if sim_timeline:
+            _low = min(sim_timeline, key=lambda e: e["balance"])
+            low_point = {"date": _low["date"], "balance": _low["balance"], "label": _low["label"]}
+
     return {
         "month":                  month,
         "transactions_by_date":   by_date,
@@ -1679,6 +1861,12 @@ async def calendar_data(month: str = None):
         "pay_events":             pay_events,
         "bills_account_balance":  bills_bal,
         "safe_spend_buffer":      safe_buffer,
+        "expected_income":        expected_income,
+        "transfer_events":        transfer_events,
+        "paid_suggestions":       paid_suggestions,
+        "cash_flow_timeline":     sim_timeline,
+        "low_point":              low_point,
+        "suggested_transfer":     suggested_transfer,
     }
 
 @router.get("/api/transactions")

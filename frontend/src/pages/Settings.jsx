@@ -66,6 +66,9 @@ export default function Settings({ active, onCrumb }) {
   const [xferPhrasesMsg, setXferPhrasesMsg] = useState(null)
   const [xferPhrasesSaving, setXferPhrasesSaving] = useState(false)
 
+  const [icalUrl, setIcalUrl] = useState(null)
+  const [icalCopied, setIcalCopied] = useState(false)
+
   const [simplefinToken, setSimplefinToken] = useState('')
   const [simplefinMsg, setSimplefinMsg] = useState(null)
   const [simplefinSaving, setSimplefinSaving] = useState(false)
@@ -271,6 +274,21 @@ export default function Settings({ active, onCrumb }) {
     finally { setSimplefinSaving(false) }
   }
 
+  async function getIcalUrl() {
+    try {
+      const d = await fetch(`${API}/calendar/ical-url`).then(r => r.json())
+      setIcalUrl(window.location.origin + d.path)
+    } catch {}
+  }
+
+  function copyIcal() {
+    if (!icalUrl) return
+    navigator.clipboard.writeText(icalUrl).then(() => {
+      setIcalCopied(true)
+      setTimeout(() => setIcalCopied(false), 2000)
+    }).catch(() => {})
+  }
+
   async function saveXferPhrases() {
     setXferPhrasesSaving(true); setXferPhrasesMsg(null)
     try {
@@ -466,6 +484,31 @@ export default function Settings({ active, onCrumb }) {
               <StatusMsg msg={simplefinMsg} />
             </form>
           )}
+        </Section>
+        <Section title="Phone Calendar Feed">
+          <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 14, lineHeight: 1.6 }}>
+            Subscribe your phone's calendar app to Hearth — bill due dates, paydays, and transfer days
+            for the next 90 days appear alongside your normal events. Works from Apple Calendar on your
+            home network (Settings → Calendar → Add Subscription). Google Calendar's cloud servers can't
+            reach a home LAN, so use Apple Calendar or any app that fetches from the device itself.
+          </div>
+          {!icalUrl ? (
+            <button className="apple-btn-primary" onClick={getIcalUrl} style={{ fontSize: 13 }}>
+              Get subscribe link
+            </button>
+          ) : (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <input className="apple-input" readOnly value={icalUrl} onFocus={e => e.target.select()}
+                style={{ flex: 1, minWidth: 240, fontSize: 12, fontFamily: 'monospace' }} />
+              <button className="apple-btn-secondary" onClick={copyIcal} style={{ fontSize: 12, flexShrink: 0 }}>
+                {icalCopied ? '✓ Copied' : 'Copy'}
+              </button>
+            </div>
+          )}
+          <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 10 }}>
+            The link contains a secret token instead of a login — anyone with the link can read your
+            bill schedule, so treat it like a password.
+          </div>
         </Section>
         <Section title="Internal Transfer Detection">
           <Field label="Transfer Phrases" hint="Comma-separated text that marks a synced transaction as an internal transfer (excluded from spending reports). Bank-specific — if you switch banks, add that bank's transfer wording here. Leave blank to use the built-in USAA defaults.">

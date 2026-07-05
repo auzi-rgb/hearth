@@ -11,6 +11,16 @@ const A = {
   billPast: '#dc2626',
   billFade: '#c4b5fd',
   txn:      '#3b82f6',
+  transfer: '#14b8a6',
+}
+
+// Commitment-tier colors for upcoming bill chips — the calendar shows WHAT
+// KIND of obligation each day carries, matching the Bills page groups.
+const TIER = {
+  Recurring:    '#3B82F6',
+  Loan:         '#8B5CF6',
+  Debt:         '#F59E0B',
+  Contribution: '#10B981',
 }
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
@@ -87,7 +97,9 @@ export default function Calendar({ active }) {
   const [data,        setData]        = useState(null)
   const [selected,    setSelected]    = useState(null)
   const [showBalance, setShowBalance] = useState(false)
+  const [showPeriods, setShowPeriods] = useState(true)
   const [billsPaid,   setBillsPaid]   = useState({})
+  const [recordingXfer, setRecordingXfer] = useState(false)
 
   const monthStr       = `${year}-${String(month).padStart(2, '0')}`
   const isCurrentMonth = year === now.getFullYear() && month === now.getMonth() + 1
@@ -130,12 +142,39 @@ export default function Calendar({ active }) {
   }
 
   function getDayData(d) {
-    if (!data || !d) return { txns: [], bills: [], pays: [] }
+    if (!data || !d) return { txns: [], bills: [], pays: [], xfers: [] }
     const k = dateKey(d)
     return {
       txns:  data.transactions_by_date?.[k] || [],
-      bills: (data.bill_events  || []).filter(e => e.date === k),
-      pays:  (data.pay_events   || []).filter(e => e.date === k),
+      bills: (data.bill_events    || []).filter(e => e.date === k),
+      pays:  (data.pay_events     || []).filter(e => e.date === k),
+      xfers: (data.transfer_events || []).filter(e => e.date === k),
+    }
+  }
+
+  // "Looks paid" suggestions keyed by bill id (suggestion only — confirming is a click)
+  const suggestionByBill = {}
+  for (const s of (data?.paid_suggestions || [])) suggestionByBill[s.bill_id] = s
+
+  // Pay periods: payday-to-payday bands. A day's period = how many paydays
+  // have happened on or before it; alternating bands make the "money I'm
+  // living on right now" window visible.
+  const payDates = [...new Set((data?.pay_events || []).map(p => p.date))].sort()
+  function periodIndex(d) {
+    const k = dateKey(d)
+    let idx = 0
+    for (const pd of payDates) { if (pd <= k) idx++ }
+    return idx
+  }
+  // Bills + contributions due within each period, keyed by the payday that opens it
+  const periodOut = {}
+  if (payDates.length) {
+    for (let i = 0; i < payDates.length; i++) {
+      const from = payDates[i]
+      const to = payDates[i + 1] || '9999-12-31'
+      periodOut[from] = (data?.bill_events || [])
+        .filter(e => e.date >= from && e.date < to && !e.paid)
+        .reduce((s, e) => s + (e.amount || 0), 0)
     }
   }
 
@@ -172,11 +211,35 @@ export default function Calendar({ active }) {
     return billDate < todayDate ? 'pastdue' : 'upcoming'
   }
 
-  function billAccent(status) {
+  function billAccent(status, bill) {
     if (status === 'paid')    return A.billPaid
     if (status === 'pastdue') return A.billPast
     if (status === 'future')  return A.billFade
-    return A.billUp
+    return TIER[bill?.payment_type] || A.billUp
+  }
+
+  async function confirmPaid(bill, sug) {
+    const key = `${bill.id}_${monthStr}`
+    setBillsPaid(prev => ({ ...prev, [key]: true }))
+    try {
+      await fetch(`${API}/bills/${bill.id}/paid`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paid: true, month: monthStr, paid_date: sug.txn_date }),
+      })
+      load()
+    } catch {}
+  }
+
+  async function recordTransfer(amount, dateStr) {
+    setRecordingXfer(true)
+    try {
+      await fetch(`${API}/transfers`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount, transfer_date: dateStr, suggested_amount: data?.suggested_transfer ?? null }),
+      })
+      load()
+    } catch {}
+    setRecordingXfer(false)
   }
 
   function billChipBg(status) {
@@ -195,21 +258,43 @@ export default function Calendar({ active }) {
   }
 
   // ── Running balance ── (red when a projected day dips below the safe-spend buffer)
+  // Current month: driven by the SAME day-by-day simulation the Dashboard's
+  // safe-to-transfer uses, so the two can never disagree. Other months fall
+  // back to the simple client-side walk.
   const threshold    = data?.safe_spend_buffer ?? 200
   const dailyBalance = {}
   if (showBalance && data) {
-    let bal = data.bills_account_balance || 0
-    for (let d = 1; d <= daysInMonth; d++) {
-      const { bills, pays } = getDayData(d)
-      for (const p of pays) bal += (p.amount || 0)
-      for (const b of bills) { if (!isPaid(b)) bal -= (b.amount || 0) }
-      dailyBalance[d] = bal
+    if (isCurrentMonth && data.cash_flow_timeline?.length) {
+      const byDate = {}
+      for (const e of data.cash_flow_timeline) byDate[e.date] = e.balance
+      let last = data.bills_account_balance || 0
+      for (let d = now.getDate(); d <= daysInMonth; d++) {
+        const k = dateKey(d)
+        if (byDate[k] != null) last = byDate[k]
+        dailyBalance[d] = last
+      }
+    } else {
+      let bal = data.bills_account_balance || 0
+      for (let d = 1; d <= daysInMonth; d++) {
+        const { bills, pays } = getDayData(d)
+        for (const p of pays) bal += (p.amount || 0)
+        for (const b of bills) { if (!isPaid(b)) bal -= (b.amount || 0) }
+        dailyBalance[d] = bal
+      }
     }
   }
 
-  // ── Month summary ──
+  // The single most important date of the month: the simulation's projected
+  // low point — the day that constrains what's safe to transfer.
+  const lowPointKey = data?.low_point?.date || null
+
+  // ── Month summary — honest math: full expected income for the month, not
+  // just what has landed so far (that comparison produced meaningless nets) ──
   const monthSummary = data ? (() => {
-    const income = (data.pay_events || [])
+    const income = data.expected_income ?? (data.pay_events || [])
+      .filter(p => !p.projected)
+      .reduce((s, p) => s + (p.amount || 0), 0)
+    const received = (data.pay_events || [])
       .filter(p => !p.projected)
       .reduce((s, p) => s + (p.amount || 0), 0)
     const bills  = (data.bill_events || [])
@@ -217,7 +302,7 @@ export default function Calendar({ active }) {
     const spent  = Object.values(data.transactions_by_date || {})
       .flat()
       .reduce((s, txn) => txn.amount < 0 ? s + Math.abs(txn.amount) : s, 0)
-    return { income, bills, spent, net: income - spent }
+    return { income, received, bills, spent, afterBills: income - bills }
   })() : null
 
   const todayNum = now.getDate()
@@ -274,6 +359,23 @@ export default function Calendar({ active }) {
           💰 {showBalance ? 'Balance On' : 'Show Balance'}
         </button>
 
+        {/* Pay-period bands toggle */}
+        <button
+          onClick={() => setShowPeriods(v => !v)}
+          title="Shade the calendar payday-to-payday — each band is one paycheck's window"
+          style={{
+            display: 'flex', alignItems: 'center', gap: 5,
+            fontSize: t.banner, fontWeight: 500,
+            background: showPeriods ? 'rgba(22,163,74,0.1)' : 'var(--bg-subtle)',
+            color: showPeriods ? A.income : 'var(--text-secondary)',
+            border: showPeriods ? '1px solid rgba(22,163,74,0.3)' : '1px solid transparent',
+            borderRadius: 20, padding: '4px 12px', cursor: 'pointer',
+            flexShrink: 0, transition: 'all 0.15s ease',
+          }}
+        >
+          ⬒ Periods
+        </button>
+
         <div style={{ flex: 1 }} />
 
         {/* Legend */}
@@ -283,11 +385,13 @@ export default function Calendar({ active }) {
           flexShrink: 0, flexWrap: 'wrap', alignItems: 'center',
         }}>
           {[
-            { color: A.income,   label: 'Paycheck'  },
-            { color: A.billUp,   label: 'Bill'       },
-            { color: A.billPast, label: 'Past due'   },
-            { color: A.billPaid, label: 'Paid'       },
-            { color: A.txn,      label: 'Spent'      },
+            { color: A.income,          label: 'Paycheck'     },
+            { color: TIER.Recurring,    label: 'Bill'          },
+            { color: TIER.Debt,         label: 'Debt'          },
+            { color: TIER.Contribution, label: 'Contribution'  },
+            { color: A.transfer,        label: 'Transfer'      },
+            { color: A.billPast,        label: 'Past due'      },
+            { color: A.billPaid,        label: 'Paid'          },
           ].map(({ color, label }) => (
             <span key={label} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
               <span style={{
@@ -320,15 +424,31 @@ export default function Calendar({ active }) {
           padding: '7px 14px',
           background: 'var(--bg-subtle)', borderRadius: 8, fontSize: t.banner,
         }}>
-          <span style={{ color: A.income,   fontWeight: 600 }}>💰 Income {money(monthSummary.income)}</span>
+          <span style={{ color: A.income, fontWeight: 600 }}
+            title={`Full month expected — ${money(monthSummary.received)} received so far`}>
+            💰 Income {money(monthSummary.income)}
+            {monthSummary.received < monthSummary.income && (
+              <span style={{ fontWeight: 400, opacity: 0.75 }}> ({money(monthSummary.received)} in)</span>
+            )}
+          </span>
           <span style={{ color: 'var(--text-tertiary)' }}>·</span>
           <span style={{ color: A.billUp,   fontWeight: 600 }}>📋 Bills {money(monthSummary.bills)}</span>
           <span style={{ color: 'var(--text-tertiary)' }}>·</span>
           <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>🛒 Spent {money(monthSummary.spent)}</span>
           <span style={{ color: 'var(--text-tertiary)' }}>·</span>
-          <span style={{ fontWeight: 700, color: monthSummary.net >= 0 ? A.income : A.billPast }}>
-            Net {money(monthSummary.net)}
+          <span style={{ fontWeight: 700, color: monthSummary.afterBills >= 0 ? A.income : A.billPast }}
+            title="Expected income minus every obligation due this month">
+            Left after bills {money(monthSummary.afterBills)}
           </span>
+          {data?.low_point && (
+            <>
+              <span style={{ color: 'var(--text-tertiary)' }}>·</span>
+              <span style={{ fontWeight: 600, color: data.low_point.balance < threshold ? A.billPast : 'var(--text-secondary)' }}
+                title={`The simulation's tightest day — right after ${data.low_point.label}. This is what limits safe-to-transfer.`}>
+                ▼ Low {money(data.low_point.balance)} on {new Date(data.low_point.date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+              </span>
+            </>
+          )}
         </div>
       )}
 
@@ -373,14 +493,22 @@ export default function Calendar({ active }) {
                 }} />
               )
 
-              const { txns, bills, pays } = getDayData(d)
+              const { txns, bills, pays, xfers } = getDayData(d)
               const isToday = isCurrentMonth && d === todayNum
               const isSel   = d === selected
+              const isLowPoint = lowPointKey === dateKey(d)
+              const isPayday = payDates.includes(dateKey(d))
 
-              // Show up to 2 chips (pays first, then bills), then "+N more"
+              // Show up to 2 chips (pays, then transfers, then bills), then "+N more"
               const pVis = Math.min(pays.length, 2)
-              const bVis = Math.min(bills.length, 2 - pVis)
-              const hiddenCount = (pays.length - pVis) + (bills.length - bVis)
+              const tVis = Math.min(xfers.length, Math.max(0, 2 - pVis))
+              const bVis = Math.min(bills.length, Math.max(0, 2 - pVis - tVis))
+              const hiddenCount = (pays.length - pVis) + (xfers.length - tVis) + (bills.length - bVis)
+
+              // Alternate pay-period bands — which paycheck window this day lives in
+              const periodBg = showPeriods && payDates.length
+                ? (periodIndex(d) % 2 === 1 ? 'rgba(22,163,74,0.045)' : 'transparent')
+                : 'transparent'
 
               return (
                 <div
@@ -389,12 +517,13 @@ export default function Calendar({ active }) {
                   style={{
                     padding: 'clamp(4px, 0.5vw, 8px)',
                     borderRadius: 6,
-                    border: isSel   ? '2px solid #3b82f6'
-                          : isToday ? '2px solid #16a34a'
+                    border: isSel      ? '2px solid #3b82f6'
+                          : isToday    ? '2px solid #16a34a'
+                          : isLowPoint ? '2px solid rgba(220,38,38,0.55)'
                           : '1px solid var(--border)',
                     background: isSel   ? 'rgba(59,130,246,0.06)'
                               : isToday ? 'rgba(22,163,74,0.05)'
-                              : 'transparent',
+                              : periodBg,
                     cursor: 'pointer',
                     overflow: 'hidden',
                     display: 'flex', flexDirection: 'column', minHeight: 0,
@@ -409,6 +538,22 @@ export default function Calendar({ active }) {
                     color: isToday ? '#16a34a' : 'var(--text-primary)',
                     marginBottom: 5, flexShrink: 0,
                   }}>{d}</div>
+
+                  {/* Tight-day marker — the simulation's projected low point */}
+                  {isLowPoint && (
+                    <div style={{ fontSize: 10, fontWeight: 700, color: A.billPast, marginBottom: 3, flexShrink: 0 }}
+                      title={`Lowest projected Bills balance this month — right after ${data.low_point.label}. This day limits safe-to-transfer.`}>
+                      ▼ low {money(data.low_point.balance)}
+                    </div>
+                  )}
+
+                  {/* Payday period micro-summary */}
+                  {showPeriods && isPayday && periodOut[dateKey(d)] > 0 && (
+                    <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginBottom: 3, flexShrink: 0 }}
+                      title="Unpaid obligations due between this paycheck and the next">
+                      {money(periodOut[dateKey(d)])} due this period
+                    </div>
+                  )}
 
                   {/* Paycheck chips */}
                   {pays.slice(0, pVis).map((p, j) => {
@@ -426,15 +571,27 @@ export default function Calendar({ active }) {
                     )
                   })}
 
+                  {/* Transfer chips */}
+                  {xfers.slice(0, tVis).map((x, j) => (
+                    <Chip
+                      key={`x-${j}`}
+                      accent={A.transfer}
+                      label={x.recorded ? `Transfer ✓ ${money(x.amount)}` : 'Transfer day'}
+                      dashed={!x.recorded}
+                      faded={!x.recorded}
+                    />
+                  ))}
+
                   {/* Bill chips */}
                   {bills.slice(0, bVis).map((b, j) => {
                     const status = billStatus(b, d)
+                    const sug = status !== 'paid' ? suggestionByBill[b.id] : null
                     return (
                       <Chip
                         key={`b-${j}`}
-                        accent={billAccent(status)}
+                        accent={billAccent(status, b)}
                         bg={billChipBg(status)}
-                        label={b.name}
+                        label={b.name + (sug ? ' ✓?' : '')}
                         strikethrough={status === 'paid'}
                         dashed={status === 'future'}
                         faded={status === 'future'}
@@ -563,43 +720,94 @@ export default function Calendar({ active }) {
                   </div>
                 )}
 
+                {/* Transfers */}
+                {selData.xfers.length > 0 && (
+                  <div>
+                    <SectionHead>Transfer</SectionHead>
+                    {selData.xfers.map((x, i) => (
+                      <div key={i} style={{ padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
+                        {x.recorded ? (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                            <span style={{ fontSize: 13, fontWeight: 500, flex: 1 }}>Recorded ✓</span>
+                            <span style={{ fontSize: 13, fontWeight: 700, color: A.transfer }}>{money(x.amount)}</span>
+                          </div>
+                        ) : (
+                          <div>
+                            <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 6 }}>Scheduled transfer day</div>
+                            {data?.suggested_transfer != null && (
+                              <button
+                                onClick={() => recordTransfer(data.suggested_transfer, selKey)}
+                                disabled={recordingXfer || data.suggested_transfer <= 0}
+                                className="apple-btn-primary"
+                                style={{ fontSize: 12, width: '100%' }}
+                                title="Records the current safe-to-transfer amount as moved on this day"
+                              >
+                                {recordingXfer ? '…' : `Record transfer of ${money(data.suggested_transfer)}`}
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
                 {/* Bills */}
                 {selData.bills.length > 0 && (
                   <div>
                     <SectionHead>Bills Due</SectionHead>
                     {selData.bills.map((b, i) => {
                       const status = billStatus(b, selected)
-                      const accent = billAccent(status)
+                      const accent = billAccent(status, b)
                       const paid   = isPaid(b)
+                      const sug    = !paid ? suggestionByBill[b.id] : null
                       return (
-                        <div key={i} style={{
-                          display: 'flex', alignItems: 'center',
-                          minHeight: 40, gap: 10,
-                          borderBottom: '1px solid var(--border)',
-                        }}>
-                          {/* Paid checkbox */}
-                          <button
-                            onClick={e => togglePaid(b, e)}
-                            title={paid ? 'Mark unpaid' : 'Mark paid'}
-                            style={{
-                              width: 18, height: 18, borderRadius: 4, flexShrink: 0,
-                              border: `1.5px solid ${accent}`,
-                              background: paid ? accent : 'transparent',
-                              cursor: 'pointer', display: 'flex', alignItems: 'center',
-                              justifyContent: 'center', fontSize: 10, color: '#fff',
-                              transition: 'all 0.15s',
-                            }}
-                          >{paid ? '✓' : ''}</button>
-                          <span style={{
-                            flex: 1, fontSize: 13, fontWeight: 500, minWidth: 0,
-                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                            color: paid ? 'var(--text-tertiary)' : 'var(--text-primary)',
-                            textDecoration: paid ? 'line-through' : 'none',
-                          }}>{b.name}</span>
-                          <span style={{
-                            fontSize: 13, fontWeight: 700, flexShrink: 0,
-                            color: paid ? A.billPaid : accent,
-                          }}>{money(b.amount)}</span>
+                        <div key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                          <div style={{
+                            display: 'flex', alignItems: 'center',
+                            minHeight: 40, gap: 10,
+                          }}>
+                            {/* Paid checkbox */}
+                            <button
+                              onClick={e => togglePaid(b, e)}
+                              title={paid ? 'Mark unpaid' : 'Mark paid'}
+                              style={{
+                                width: 18, height: 18, borderRadius: 4, flexShrink: 0,
+                                border: `1.5px solid ${accent}`,
+                                background: paid ? accent : 'transparent',
+                                cursor: 'pointer', display: 'flex', alignItems: 'center',
+                                justifyContent: 'center', fontSize: 10, color: '#fff',
+                                transition: 'all 0.15s',
+                              }}
+                            >{paid ? '✓' : ''}</button>
+                            <span style={{
+                              flex: 1, fontSize: 13, fontWeight: 500, minWidth: 0,
+                              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                              color: paid ? 'var(--text-tertiary)' : 'var(--text-primary)',
+                              textDecoration: paid ? 'line-through' : 'none',
+                            }}>{b.name}</span>
+                            <span style={{
+                              fontSize: 13, fontWeight: 700, flexShrink: 0,
+                              color: paid ? A.billPaid : accent,
+                            }}>{money(b.amount)}</span>
+                          </div>
+                          {sug && (
+                            <div style={{
+                              display: 'flex', alignItems: 'center', gap: 8,
+                              padding: '0 0 8px 28px', fontSize: 11, color: 'var(--text-secondary)',
+                            }}>
+                              <span>Looks paid — {money(sug.amount)} on {new Date(sug.txn_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
+                              <button
+                                onClick={() => confirmPaid(b, sug)}
+                                style={{
+                                  fontSize: 11, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer',
+                                  background: 'rgba(22,163,74,0.1)', color: A.income,
+                                  border: '1px solid rgba(22,163,74,0.3)', borderRadius: 5, padding: '2px 8px',
+                                }}>
+                                Confirm
+                              </button>
+                            </div>
+                          )}
                         </div>
                       )
                     })}
@@ -643,7 +851,7 @@ export default function Calendar({ active }) {
                 )}
 
                 {/* Empty state */}
-                {selData.pays.length === 0 && selData.bills.length === 0 && selData.txns.length === 0 && (
+                {selData.pays.length === 0 && selData.bills.length === 0 && selData.txns.length === 0 && selData.xfers.length === 0 && (
                   <div style={{
                     flex: 1, display: 'flex', flexDirection: 'column',
                     alignItems: 'center', justifyContent: 'center',
