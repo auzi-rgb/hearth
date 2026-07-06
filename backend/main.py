@@ -923,6 +923,53 @@ def cash_flow_projection(conn, end_date, start_balance=None) -> list:
         })
     return timeline
 
+def get_committed_budget(conn) -> float:
+    """y — the household's committed monthly living budget. The number the rest
+    of the app plans against (transfers, surplus). Set by 'Commit Budget' on the
+    Budget page; edits to category limits are a draft until committed, so you can
+    play with the numbers without moving the app's math. Falls back to the live
+    sum of category limits until the first commit."""
+    val = get_setting(conn, "committed_budget")
+    if val is not None:
+        try:
+            return round(float(val), 2)
+        except (ValueError, TypeError):
+            pass
+    row = conn.execute("SELECT COALESCE(SUM(monthly_limit),0) FROM budgets WHERE category!='savings'").fetchone()
+    return round(float(row[0] or 0), 2)
+
+def compute_planned_transfers(conn, timeline, buffer, current_balance) -> dict:
+    """The two planned Bills→Food transfers: fund Food with the committed budget
+    (y) split across the scheduled transfer days, each capped so it never drops
+    the projected Bills balance below the buffer (envelope funding with a safety
+    ceiling). Earlier transfers reduce the headroom for later ones."""
+    y = get_committed_budget(conn)
+    try:
+        sched = json.loads(get_setting(conn, "transfer_schedule") or "{}")
+    except (ValueError, TypeError):
+        sched = {}
+    if sched.get("mode") == "payday":
+        pay_dates = sorted({e["date"] for e in timeline if e["kind"] == "income"})
+        dates = [date.fromisoformat(d) for d in pay_dates[:2]]
+    else:
+        try:
+            days = sorted({int(x) for x in sched.get("days", [1, 15]) if 1 <= int(x) <= 28}) or [1, 15]
+        except (ValueError, TypeError):
+            days = [1, 15]
+        dates = sorted({next_bill_date(dd) for dd in days})[:2]
+    n = len(dates) or 1
+    portion = round(y / n, 2)
+    out = []
+    removed = 0.0
+    for d in dates:
+        fut = [e["balance"] for e in timeline if e["date"] >= d.isoformat()]
+        future_min = (min(fut) if fut else current_balance) - removed
+        safe = future_min - buffer
+        amt = round(min(portion, max(0.0, safe)), 2)
+        removed += amt
+        out.append({"date": d.isoformat(), "planned": portion, "amount": amt, "capped": amt < portion - 0.01})
+    return {"committed_budget": y, "portion": portion, "transfers": out, "total_planned": round(sum(t["amount"] for t in out), 2)}
+
 def find_role_account(conn, role: str, name_hint: str):
     """Resolve which account plays a special role (bills, food). An explicit
     setting ({role}_account_id, set on the Settings page) always wins; the legacy
@@ -1599,6 +1646,13 @@ async def dashboard():
     actual_living_median = round(statistics.median([float(r["t"]) for r in _living_rows]), 2) if _living_rows else None
     living_squeeze = round(left_to_live - actual_living_median, 2) if actual_living_median is not None else None
 
+    # Committed-budget model: y funds Food via planned transfers; surplus-to-debt
+    # is what's left after everything, and grows as bills shrink or y drops.
+    planned = compute_planned_transfers(conn, cash_flow_timeline, safe_buffer, bills_balance)
+    committed_budget = planned["committed_budget"]
+    savings_goal = float(conn.execute("SELECT COALESCE(SUM(monthly_limit),0) FROM budgets WHERE category='savings'").fetchone()[0])
+    budget_surplus = round(_baseline["baseline_income"] - hardline_total - contributions_total - savings_goal - committed_budget, 2)
+
     # Data freshness — safe-to-transfer is only actionable if balances are fresh
     _sync_row = conn.execute(
         "SELECT synced_at FROM sync_log WHERE status='ok' ORDER BY synced_at DESC LIMIT 1"
@@ -1666,6 +1720,9 @@ async def dashboard():
         "left_to_live": fmt_money(left_to_live),
         "actual_living_median": actual_living_median,
         "living_squeeze": living_squeeze,
+        "committed_budget": committed_budget,
+        "budget_surplus": budget_surplus,
+        "planned_transfers": planned,
         "monthly_surplus": fmt_money(monthly_surplus),
         "suggested_transfer": fmt_money(suggested_transfer),
         "baseline_income": _baseline["baseline_income"],
@@ -1938,6 +1995,9 @@ async def calendar_data(month: str = None):
             "food_daily_allowance": allowance,
             "food_daily_pace": pace,
             "runway_days": runway_days,
+            "committed_budget": _dash.get("committed_budget"),
+            "budget_surplus": _dash.get("budget_surplus"),
+            "planned_transfers": _dash.get("planned_transfers"),
         }
 
     return {
@@ -2258,6 +2318,32 @@ async def get_budgets():
         })
     conn.close()
     return result
+
+@router.post("/api/budget/commit")
+async def commit_budget(request: Request):
+    """Snapshot the current total category budget as y — the committed number the
+    rest of the app plans against. Body may pass an explicit `value`; otherwise
+    the live sum of category limits (excluding the savings goal) is committed."""
+    body = await request.json()
+    conn = get_db()
+    if body.get("value") is not None:
+        y = round(float(body["value"]), 2)
+    else:
+        row = conn.execute("SELECT COALESCE(SUM(monthly_limit),0) FROM budgets WHERE category!='savings'").fetchone()
+        y = round(float(row[0] or 0), 2)
+    set_setting(conn, "committed_budget", str(y))
+    set_setting(conn, "committed_budget_at", datetime.now().isoformat())
+    conn.close()
+    return {"committed_budget": y}
+
+@router.get("/api/budget/committed")
+async def get_committed():
+    conn = get_db()
+    y = get_committed_budget(conn)
+    at = get_setting(conn, "committed_budget_at")
+    live = float(conn.execute("SELECT COALESCE(SUM(monthly_limit),0) FROM budgets WHERE category!='savings'").fetchone()[0])
+    conn.close()
+    return {"committed_budget": y, "committed_at": at, "live_total": round(live, 2)}
 
 @router.get("/api/budgets/{primary}/breakdown")
 async def budget_breakdown(primary: str, month: str = None):

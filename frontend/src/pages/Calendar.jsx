@@ -332,6 +332,9 @@ export default function Calendar({ active }) {
   const manualUpcoming = (data?.bill_events || [])
     .filter(e => e.autopay === false && !e.paid && e.date >= todayKey)
     .sort((a, b) => a.date.localeCompare(b.date))
+  // Planned Bills→Food transfers (committed budget y split across transfer days)
+  const plannedByDate = {}
+  for (const t of (health?.planned_transfers?.transfers || [])) plannedByDate[t.date] = t
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -660,16 +663,16 @@ export default function Calendar({ active }) {
                     )
                   })}
 
-                  {/* Transfer chips */}
-                  {xfers.slice(0, tVis).map((x, j) => (
-                    <Chip
-                      key={`x-${j}`}
-                      accent={A.transfer}
-                      label={x.recorded ? `Transfer ✓ ${money(x.amount)}` : 'Transfer day'}
-                      dashed={!x.recorded}
-                      faded={!x.recorded}
-                    />
-                  ))}
+                  {/* Transfer chips — show the planned amount for the day */}
+                  {xfers.slice(0, tVis).map((x, j) => {
+                    const plan = plannedByDate[dateKey(d)]
+                    const label = x.recorded ? `Transfer ✓ ${money(x.amount)}`
+                      : plan ? `Transfer ${money(plan.amount)}` : 'Transfer day'
+                    return (
+                      <Chip key={`x-${j}`} accent={A.transfer} label={label}
+                        dashed={!x.recorded} faded={!x.recorded} />
+                    )
+                  })}
 
                   {/* Bill chips */}
                   {bills.slice(0, bVis).map((b, j) => {
@@ -818,22 +821,28 @@ export default function Calendar({ active }) {
                             <span style={{ fontSize: 13, fontWeight: 500, flex: 1 }}>Recorded ✓</span>
                             <span style={{ fontSize: 13, fontWeight: 700, color: A.transfer }}>{money(x.amount)}</span>
                           </div>
-                        ) : (
-                          <div>
-                            <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 6 }}>Scheduled transfer day</div>
-                            {data?.suggested_transfer != null && (
-                              <button
-                                onClick={() => recordTransfer(data.suggested_transfer, selKey)}
-                                disabled={recordingXfer || data.suggested_transfer <= 0}
-                                className="apple-btn-primary"
-                                style={{ fontSize: 12, width: '100%' }}
-                                title="Records the current safe-to-transfer amount as moved on this day"
-                              >
-                                {recordingXfer ? '…' : `Record transfer of ${money(data.suggested_transfer)}`}
-                              </button>
-                            )}
-                          </div>
-                        )}
+                        ) : (() => {
+                          const plan = plannedByDate[selKey]
+                          const amt = plan ? plan.amount : data?.suggested_transfer
+                          return (
+                            <div>
+                              <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 6 }}>
+                                {plan ? 'Planned transfer day' : 'Scheduled transfer day'}
+                              </div>
+                              {amt != null && amt > 0 && (
+                                <button
+                                  onClick={() => recordTransfer(amt, selKey)}
+                                  disabled={recordingXfer}
+                                  className="apple-btn-primary"
+                                  style={{ fontSize: 12, width: '100%' }}
+                                  title="Records this transfer from Bills to Food on this day"
+                                >
+                                  {recordingXfer ? '…' : `Record transfer of ${money(amt)}`}
+                                </button>
+                              )}
+                            </div>
+                          )
+                        })()}
                       </div>
                     ))}
                   </div>
@@ -1021,22 +1030,56 @@ export default function Calendar({ active }) {
                   )}
                 </div>
 
-                {/* Action: transfer */}
-                {health.suggested_transfer > 0 && (
+                {/* Planned transfers: fund Food with the committed budget (y) */}
+                {health.planned_transfers?.transfers?.length > 0 && (
                   <div style={{ padding: '12px 14px', borderRadius: 10, background: 'var(--bg-subtle)', border: '1px solid var(--border)' }}>
-                    <div style={{ fontSize: 13, marginBottom: 8 }}>
-                      Safe to transfer to Food: <strong style={{ color: A.transfer }}>{money(health.suggested_transfer)}</strong>
-                      <span style={{ color: 'var(--text-tertiary)' }}> · next transfer day in {health.days_until_transfer}d</span>
+                    <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-tertiary)', marginBottom: 8 }}>
+                      Fund Food — budget {money(health.committed_budget)}/mo
                     </div>
-                    <button
-                      onClick={() => recordTransfer(health.suggested_transfer, todayKey)}
-                      disabled={recordingXfer}
-                      className="apple-btn-primary"
-                      style={{ fontSize: 12, width: '100%' }}
-                      title="Records this amount as moved from Bills to Food today"
-                    >
-                      {recordingXfer ? '…' : `Record transfer of ${money(health.suggested_transfer)}`}
-                    </button>
+                    {health.planned_transfers.transfers.map((tr, i) => (
+                      <div key={i} style={{ marginBottom: 8 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', fontSize: 13, marginBottom: 4 }}>
+                          <span style={{ color: 'var(--text-secondary)' }}>
+                            {new Date(tr.date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                          </span>
+                          <span style={{ fontWeight: 700, color: A.transfer }}>
+                            {money(tr.amount)}
+                            {tr.capped && <span style={{ fontSize: 10, color: '#d97706', fontWeight: 600 }}> capped</span>}
+                          </span>
+                        </div>
+                        <button
+                          onClick={() => recordTransfer(tr.amount, tr.date)}
+                          disabled={recordingXfer || tr.amount <= 0}
+                          className="apple-btn-secondary"
+                          style={{ fontSize: 11, width: '100%' }}
+                          title="Records this planned transfer from Bills to Food"
+                        >
+                          {recordingXfer ? '…' : `Record ${money(tr.amount)}`}
+                        </button>
+                      </div>
+                    ))}
+                    {health.planned_transfers.transfers.some(tr => tr.capped) && (
+                      <div style={{ fontSize: 11, color: '#d97706', marginTop: 2, lineHeight: 1.45 }}>
+                        A transfer is capped because Bills would dip below your buffer — move the rest once income lands.
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Surplus to debt — the number that grows */}
+                {health.budget_surplus != null && (
+                  <div style={{ padding: '12px 14px', borderRadius: 10,
+                    background: health.budget_surplus >= 0 ? 'rgba(22,163,74,0.06)' : 'rgba(220,38,38,0.07)',
+                    border: `1px solid ${health.budget_surplus >= 0 ? 'rgba(22,163,74,0.25)' : 'rgba(220,38,38,0.3)'}` }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                      <span style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-tertiary)' }}>Surplus to debt</span>
+                      <span style={{ fontSize: 18, fontWeight: 700, fontVariantNumeric: 'tabular-nums', color: health.budget_surplus >= 0 ? A.income : A.billPast }}>
+                        {money(health.budget_surplus)}/mo
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginTop: 4, lineHeight: 1.45 }}>
+                      After bills, debt, contributions, and your {money(health.committed_budget)} budget. Grows when you trim a bill or spend under budget.
+                    </div>
                   </div>
                 )}
 

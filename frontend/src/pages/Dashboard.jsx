@@ -452,6 +452,40 @@ export default function Dashboard({ active, navigateTo }) {
         </div>
       )}
 
+      {/* ── The plan: committed budget → planned transfers → surplus to debt ── */}
+      {data.planned_transfers?.transfers?.length > 0 && (
+        <div className="apple-card" style={{ padding: '16px 22px', marginBottom: 16 }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: isMobile ? 14 : 26, alignItems: 'baseline' }}>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: 'var(--text-tertiary)' }}>Budget / mo</div>
+              <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '-0.03em', fontVariantNumeric: 'tabular-nums' }}>{money(data.committed_budget)}</div>
+            </div>
+            {data.planned_transfers.transfers.map((tr, i) => (
+              <div key={i}>
+                <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: 'var(--text-tertiary)' }}>
+                  Transfer {new Date(tr.date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                </div>
+                <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '-0.03em', fontVariantNumeric: 'tabular-nums', color: 'var(--blue)' }}>
+                  {money(tr.amount)}{tr.capped && <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--orange, #FF9500)' }}> capped</span>}
+                </div>
+              </div>
+            ))}
+            <div style={{ marginLeft: 'auto', textAlign: 'right' }}>
+              <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: 'var(--text-tertiary)' }}>Surplus to debt</div>
+              <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.03em', fontVariantNumeric: 'tabular-nums',
+                color: (data.budget_surplus ?? 0) >= 0 ? 'var(--accent-text)' : 'var(--red)' }}>
+                {money(data.budget_surplus)}/mo
+              </div>
+            </div>
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 8, lineHeight: 1.5 }}>
+            Fund Food with your budget across two transfers; the surplus is what's left for debt.
+            {data.planned_transfers.transfers.some(tr => tr.capped) && ' A transfer is capped because Bills would dip below your buffer — move the rest once income lands.'}
+            {' '}Adjust and Commit on the Budget tab.
+          </div>
+        </div>
+      )}
+
       {/* ── Cards 1 + 2: side-by-side on tablet/desktop ────────────────────── */}
       <div style={{
         display: 'grid',

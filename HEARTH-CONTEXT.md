@@ -238,6 +238,13 @@ The household runs bills on **autopay** from a funded Bills account, so the bill
 - `GET /api/calendar` returns a `health` block (current month only): `bills_status` (ok/tight/danger), `low_point`, `overdraft_warnings`, `suggested_transfer`, `living_status` (ok/over), `food_balance`, `food_daily_allowance/pace`, `runway_days`, `days_until_transfer`.
 - Calendar sidebar bottom = **health panel** (Bills funded? + Living money? + transfer action + manual-bill action items), NOT an itemized agenda (tried that in the list-view sidebar; itemizing autopay bills was noise the household explicitly rejected). Grid/list view toggle and per-day detail (top of sidebar, capped height) remain.
 
+## Committed budget model (Session 8+)
+
+The household's planning equation, made real in the app:
+- **y = committed budget** (`committed_budget` setting, currently $1,450) — the monthly living allocation the app plans against. Set by **Commit Budget** on the Budget page; editing category limits is a *draft* until committed (rest of the app keeps using the last committed y). `get_committed_budget()` falls back to the live category-limit sum before first commit. Endpoints: `POST /api/budget/commit` (snapshots the live sum or an explicit `value`), `GET /api/budget/committed` (returns committed / committed_at / live_total for the draft indicator).
+- **Planned transfers** (`compute_planned_transfers`): fund Food with y split across the two scheduled transfer days (50/50), each capped so it never drops the projected Bills balance below the buffer (sequential — earlier transfers reduce later headroom). In the dashboard/calendar payload as `planned_transfers = {committed_budget, portion, transfers[{date, planned, amount, capped}], total_planned}`. Shown on Calendar transfer chips, the Calendar health panel, and the Dashboard "plan" strip; Record buttons prefill the planned amount for that date.
+- **budget_surplus** = baseline_income − hardline − contributions − savings_goal − y. The surplus-to-debt that grows when a bill is trimmed or spending comes in under budget. Matches the Budget page's "Surplus to Debt" chip (currently ~$41). In dashboard + calendar-health payloads.
+
 ## Known Issues (from Session 6 QC review — not yet fixed)
 
 1. **Sync fuzzy dedup can drop real transactions** — same account + amount within 1 day with different descriptions is treated as a duplicate (sync.py). Two distinct same-priced purchases on the same day → second one never imported.

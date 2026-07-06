@@ -493,6 +493,8 @@ export default function Budget({ active, onAlert, navigateTo }) {
   const [income, setIncome] = useState(0)
   const [actualIncome, setActualIncome] = useState(0)
   const [squeezeInfo, setSqueezeInfo] = useState(null)
+  const [committed, setCommitted] = useState(null) // { committed_budget, committed_at }
+  const [committing, setCommitting] = useState(false)
 
   // Real categories — source of truth: GET /api/categories. primaries carries
   // each primary's secondaries (for the click-to-expand breakdown); base/custom
@@ -619,8 +621,10 @@ export default function Budget({ active, onAlert, navigateTo }) {
       const dash = await fetch(`${API}/dashboard`).then(r => r.json())
       setIncome(getBaselineIncome(dash))
       setActualIncome(getMonthlyIncome(dash))
-      setSqueezeInfo({ left: dash.left_to_live, living: dash.actual_living_median, gap: dash.living_squeeze })
+      setSqueezeInfo({ left: dash.left_to_live, living: dash.actual_living_median, gap: dash.living_squeeze,
+        surplus: dash.budget_surplus, committedBudget: dash.committed_budget })
     } catch {}
+    try { setCommitted(await fetch(`${API}/budget/committed`).then(r => r.json())) } catch {}
   }, [])
 
   const loadHistory = useCallback(async () => {
@@ -691,6 +695,15 @@ export default function Budget({ active, onAlert, navigateTo }) {
   }, [active, loadCategories, loadBills, loadSpent, loadIncome, loadHistory])
 
   // ── Actions ──────────────────────────────────────────────────────────────────
+
+  async function commitBudget() {
+    setCommitting(true)
+    try {
+      await fetch(`${API}/budget/commit`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+      await loadIncome()
+    } catch {}
+    setCommitting(false)
+  }
 
   function handleLimitChange(name, value) {
     // 1. Update localStorage immediately — cards re-render instantly
@@ -816,6 +829,38 @@ export default function Budget({ active, onAlert, navigateTo }) {
             </span>
           </div>
         )}
+
+        {/* Commit Budget — the number the rest of the app plans against.
+            Edit category limits freely; nothing downstream moves until you commit. */}
+        {committed && (() => {
+          const draft = Math.abs(allocatedTotal - (committed.committed_budget || 0)) > 0.5
+          return (
+            <div style={{ marginTop: 10, padding: '12px 16px', borderRadius: 12,
+              background: draft ? 'rgba(124,58,237,0.06)' : 'var(--bg-subtle)',
+              border: `1px solid ${draft ? 'rgba(124,58,237,0.28)' : 'var(--border)'}`,
+              display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+              <div style={{ flex: 1, minWidth: 200, fontSize: 13, lineHeight: 1.55 }}>
+                <div>
+                  <span style={{ color: 'var(--text-secondary)' }}>App plans against committed budget: </span>
+                  <strong>{money(committed.committed_budget)}</strong>
+                  {draft && <span style={{ color: '#7c3aed', fontWeight: 600 }}> · draft {money(allocatedTotal)} not applied yet</span>}
+                </div>
+                {squeezeInfo?.surplus != null && (
+                  <div style={{ marginTop: 3, color: 'var(--text-secondary)' }}>
+                    Surplus to debt: <strong style={{ color: squeezeInfo.surplus >= 0 ? 'var(--accent-text)' : 'var(--red)' }}>
+                      {money(squeezeInfo.surplus)}/mo
+                    </strong>
+                    <span style={{ color: 'var(--text-tertiary)' }}> — grows as you trim bills or spend under budget</span>
+                  </div>
+                )}
+              </div>
+              <button className="apple-btn-primary" onClick={commitBudget} disabled={committing || !draft}
+                style={{ fontSize: 13, flexShrink: 0 }}>
+                {committing ? 'Committing…' : draft ? `Commit ${money(allocatedTotal)}` : '✓ Committed'}
+              </button>
+            </div>
+          )
+        })()}
       </div>
 
       {/* 3. My Budget Categories */}
