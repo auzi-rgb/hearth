@@ -1041,6 +1041,9 @@ export default function Calendar({ active }) {
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', fontSize: 13, marginBottom: 4 }}>
                           <span style={{ color: 'var(--text-secondary)' }}>
                             {new Date(tr.date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                            {tr.shifted && (
+                              <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}> · from {new Date(tr.scheduled_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
+                            )}
                           </span>
                           <span style={{ fontWeight: 700, color: A.transfer }}>
                             {money(tr.amount)}
@@ -1058,9 +1061,14 @@ export default function Calendar({ active }) {
                         </button>
                       </div>
                     ))}
+                    {health.planned_transfers.transfers.some(tr => tr.shifted && !tr.capped) && (
+                      <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2, lineHeight: 1.45 }}>
+                        A transfer moved a day or two to land after payday — Bills stays above your buffer that way.
+                      </div>
+                    )}
                     {health.planned_transfers.transfers.some(tr => tr.capped) && (
                       <div style={{ fontSize: 11, color: '#d97706', marginTop: 2, lineHeight: 1.45 }}>
-                        A transfer is capped because Bills would dip below your buffer — move the rest once income lands.
+                        Even after shifting, a transfer won't fully fund without dipping below your buffer — move the rest once more income lands.
                       </div>
                     )}
                   </div>

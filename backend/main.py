@@ -938,11 +938,29 @@ def get_committed_budget(conn) -> float:
     row = conn.execute("SELECT COALESCE(SUM(monthly_limit),0) FROM budgets WHERE category!='savings'").fetchone()
     return round(float(row[0] or 0), 2)
 
+def _min_balance_from(timeline, start_balance, from_iso) -> float:
+    """Lowest projected Bills balance on or after from_iso (no transfer applied).
+    Balance is flat between events, so the min is the balance entering that day
+    plus every event balance from that day forward — which already reflects any
+    paychecks that land within the window."""
+    entering = start_balance
+    for e in timeline:
+        if e["date"] < from_iso:
+            entering = e["balance"]
+    m = entering
+    for e in timeline:
+        if e["date"] >= from_iso:
+            m = min(m, e["balance"])
+    return m
+
 def compute_planned_transfers(conn, timeline, buffer, current_balance) -> dict:
     """The two planned Bills→Food transfers: fund Food with the committed budget
-    (y) split across the scheduled transfer days, each capped so it never drops
-    the projected Bills balance below the buffer (envelope funding with a safety
-    ceiling). Earlier transfers reduce the headroom for later ones."""
+    (y) split 50/50 across the scheduled transfer days. Each transfer may SHIFT
+    within a window (default 3 days, transfer_window_days) to the earliest day it
+    can be fully funded without dropping the projected Bills balance below the
+    buffer — so a transfer scheduled the day before payday waits for the paycheck
+    instead of being needlessly capped. Only if no day in the window can fund it
+    is the amount capped. Earlier transfers reduce headroom for later ones."""
     y = get_committed_budget(conn)
     try:
         sched = json.loads(get_setting(conn, "transfer_schedule") or "{}")
@@ -957,18 +975,46 @@ def compute_planned_transfers(conn, timeline, buffer, current_balance) -> dict:
         except (ValueError, TypeError):
             days = [1, 15]
         dates = sorted({next_bill_date(dd) for dd in days})[:2]
+    try:
+        win = max(0, int(get_setting(conn, "transfer_window_days", "3") or 3))
+    except (ValueError, TypeError):
+        win = 3
+    today = date.today()
     n = len(dates) or 1
     portion = round(y / n, 2)
     out = []
     removed = 0.0
-    for d in dates:
-        fut = [e["balance"] for e in timeline if e["date"] >= d.isoformat()]
-        future_min = (min(fut) if fut else current_balance) - removed
-        safe = future_min - buffer
-        amt = round(min(portion, max(0.0, safe)), 2)
+    for i, d in enumerate(dates):
+        end_c = d + timedelta(days=win)
+        if i + 1 < len(dates):
+            end_c = min(end_c, dates[i + 1] - timedelta(days=1))  # don't overlap the next transfer
+        funded_day = None
+        best_c, best_safe = d, 0.0
+        c = d
+        while c <= end_c:
+            if c >= today:
+                safe = round(_min_balance_from(timeline, current_balance, c.isoformat()) - removed - buffer, 2)
+                if safe > best_safe:
+                    best_c, best_safe = c, safe
+                if safe >= portion:
+                    funded_day = c
+                    break
+            c += timedelta(days=1)
+        if funded_day is not None:
+            chosen, amt = funded_day, portion
+        else:
+            chosen, amt = best_c, round(max(0.0, best_safe), 2)
         removed += amt
-        out.append({"date": d.isoformat(), "planned": portion, "amount": amt, "capped": amt < portion - 0.01})
-    return {"committed_budget": y, "portion": portion, "transfers": out, "total_planned": round(sum(t["amount"] for t in out), 2)}
+        out.append({
+            "date": chosen.isoformat(),
+            "scheduled_date": d.isoformat(),
+            "shifted": chosen != d,
+            "planned": portion,
+            "amount": amt,
+            "capped": amt < portion - 0.01,
+        })
+    return {"committed_budget": y, "portion": portion, "window_days": win,
+            "transfers": out, "total_planned": round(sum(t["amount"] for t in out), 2)}
 
 def find_role_account(conn, role: str, name_hint: str):
     """Resolve which account plays a special role (bills, food). An explicit
