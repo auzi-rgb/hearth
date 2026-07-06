@@ -1721,6 +1721,7 @@ async def dashboard():
         "actual_living_median": actual_living_median,
         "living_squeeze": living_squeeze,
         "committed_budget": committed_budget,
+        "savings_goal": round(savings_goal, 2),
         "budget_surplus": budget_surplus,
         "planned_transfers": planned,
         "monthly_surplus": fmt_money(monthly_surplus),

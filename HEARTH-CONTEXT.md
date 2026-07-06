@@ -245,6 +245,15 @@ The household's planning equation, made real in the app:
 - **Planned transfers** (`compute_planned_transfers`): fund Food with y split across the two scheduled transfer days (50/50), each capped so it never drops the projected Bills balance below the buffer (sequential — earlier transfers reduce later headroom). In the dashboard/calendar payload as `planned_transfers = {committed_budget, portion, transfers[{date, planned, amount, capped}], total_planned}`. Shown on Calendar transfer chips, the Calendar health panel, and the Dashboard "plan" strip; Record buttons prefill the planned amount for that date.
 - **budget_surplus** = baseline_income − hardline − contributions − savings_goal − y. The surplus-to-debt that grows when a bill is trimmed or spending comes in under budget. Matches the Budget page's "Surplus to Debt" chip (currently ~$41). In dashboard + calendar-health payloads.
 
+## The household equation (Session 8+) — pressure-tested
+
+**s = P − B − D − C − U** — the identity the whole app obeys.
+- P = baseline_income · B = bills_recurring_total · D = debt_payments_total · C = contributions_total (+ savings_goal; a budget "savings" category is folded into C so the equation can't drift) · U = committed_budget · s = budget_surplus.
+- Verified numerically consistent across Dashboard, Budget, Calendar (all read `budget_surplus`; B+D+C conserve; hardline = B+D). On About page as a live equation + physics compact form + phase-transition chart.
+- **Y = left_to_live = P − B − D − C** (available to budget). **s = Y − U.** Break-even spend is L = Y (= U + s), so the surplus s IS the entire margin between budget and going negative.
+- **L (actual living spend) measurement is basis-dependent — a known tension:** `actual_living_median` counts ALL discretionary across all accounts (~$5.4k for this household); the food-runway uses Food-account outflow only (~$3.5k); U budgets just 4 primary categories (~$1.45k). They answer different questions (true living cost vs Food-account cash vs planned budget) but must be read with that in mind. The household's U is far below actual living spend — the budget is aspirational/incomplete, which the About phase-transition chart shows honestly (L sits deep in the red past break-even).
+- **Two transfer numbers, disambiguated:** Dashboard "Safe to move now" = `suggested_transfer` (guardrail, max safe today); the Plan strip / Calendar "planned transfers" = U-based envelope funding. Money Flow "Cash beyond bills (this month)" = actual income − all bills (distinct from the plan's surplus-to-debt).
+
 ## Known Issues (from Session 6 QC review — not yet fixed)
 
 1. **Sync fuzzy dedup can drop real transactions** — same account + amount within 1 day with different descriptions is treated as a duplicate (sync.py). Two distinct same-priced purchases on the same day → second one never imported.

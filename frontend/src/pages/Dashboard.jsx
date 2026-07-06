@@ -519,7 +519,9 @@ export default function Dashboard({ active, navigateTo }) {
         <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0',
           borderTop: '1px solid var(--border)', borderBottom: '2px solid var(--border)', fontSize: 14,
           marginBottom: 14 }}>
-          <span style={{ color: 'var(--text-secondary)' }}>Left after bills</span>
+          <span style={{ color: 'var(--text-secondary)' }} title="This month's actual cash: real income minus every obligation. Not the plan's surplus-to-debt (that's baseline income minus your committed budget, shown in the Plan strip).">
+            Cash beyond bills <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>(this month)</span>
+          </span>
           <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums',
             color: monthlySurplus >= 0 ? 'var(--accent-text)' : 'var(--red)' }}>
             {money(monthlySurplus)}
@@ -528,8 +530,9 @@ export default function Dashboard({ active, navigateTo }) {
 
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
           paddingBottom: 4 }}>
-          <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-secondary)' }}>
-            Suggested transfer to Food
+          <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-secondary)' }}
+            title="The most you could safely move to Food today without risking autopay — a ceiling, not the plan. Your planned budget transfers are in the Plan strip above and on the Calendar.">
+            Safe to move now
           </span>
           <span style={{ fontSize: isMobile ? 30 : 34, fontWeight: 700, letterSpacing: '-0.04em',
             color: 'var(--accent-text)', fontVariantNumeric: 'tabular-nums' }}>

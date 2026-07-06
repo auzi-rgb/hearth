@@ -252,6 +252,109 @@ function SystemView({ n, dash, dim, setHovered, setZoomed }) {
   )
 }
 
+// The household equation as physics, with live numbers and the phase transition
+// (the moment actual spend L crosses break-even and real surplus goes negative).
+function EquationSection({ P, B, D, C, U, s, Y, L }) {
+  const m0 = v => v == null ? '—' : (v < 0 ? '−$' : '$') + Math.abs(Math.round(v)).toLocaleString('en-US')
+
+  // Phase-transition chart: s_real(spend) = Y − spend. Positive above the zero
+  // line (surplus), negative below (financed by debt). Markers at U (budget),
+  // Y (break-even), and L (what you actually spend).
+  const W = 640, H = 260, padL = 54, padR = 20, padT = 18, padB = 42
+  const plotW = W - padL - padR, plotH = H - padT - padB
+  const xmax = Math.max((L || Y) * 1.12, Y * 1.6, U * 2, 1)
+  const ymax = Y, ymin = Y - xmax
+  const xToPx = x => padL + (Math.max(0, Math.min(x, xmax)) / xmax) * plotW
+  const yToPx = y => padT + ((ymax - y) / (ymax - ymin)) * plotH
+  const zeroY = yToPx(0)
+  const sReal = x => Y - x
+
+  const markers = [
+    { x: U, label: 'U · budget', color: 'var(--blue)' },
+    { x: Y, label: 'Y · break-even', color: 'var(--text-secondary)' },
+    ...(L != null ? [{ x: L, label: 'L · you spend', color: L > Y ? 'var(--red)' : 'var(--accent)' }] : []),
+  ]
+
+  return (
+    <div className="apple-card" style={{ padding: '28px 32px', marginTop: 20 }}>
+      <div style={{ fontSize: 18, fontWeight: 700, letterSpacing: '-0.02em', marginBottom: 4 }}>The household equation</div>
+      <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 20 }}>
+        Every page in Hearth obeys one line. Income comes in; four forces pull off the top; what survives is surplus.
+      </div>
+
+      {/* Compact (physics) form */}
+      <div style={{ background: 'var(--bg-subtle)', borderRadius: 12, padding: '18px 20px', marginBottom: 18, overflowX: 'auto' }}>
+        <div style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: 19, fontWeight: 500, letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>
+          s = P − (B + D + C + U) − (L−U)·Θ(L−U) − ∮ r·Q dt
+        </div>
+        <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 8, lineHeight: 1.6 }}>
+          The clean identity is <strong>s = P − B − D − C − U</strong>. The last two terms are corrections: the
+          step function <strong>Θ</strong> switches on only when you overspend the budget (L &gt; U); the loop
+          integral <strong>∮r·Q</strong> is interest — money leaving as heat, doing no work.
+        </div>
+      </div>
+
+      {/* Live values */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(88px, 1fr))', gap: 10, marginBottom: 22 }}>
+        {[
+          ['P', 'income', P, 'var(--text-primary)'],
+          ['B', 'bills', -B, 'var(--red)'],
+          ['D', 'debt', -D, 'var(--orange)'],
+          ['C', 'contrib.', -C, 'var(--accent-text)'],
+          ['U', 'budget', -U, 'var(--blue)'],
+          ['s', 'surplus', s, s >= 0 ? 'var(--accent-text)' : 'var(--red)'],
+        ].map(([sym, name, val, color]) => (
+          <div key={sym} style={{ textAlign: 'center', padding: '8px 4px', background: 'var(--bg-subtle)', borderRadius: 8 }}>
+            <div style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: 16, fontWeight: 700 }}>{sym}</div>
+            <div style={{ fontSize: 10, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{name}</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color, fontVariantNumeric: 'tabular-nums', marginTop: 2 }}>{m0(val)}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* The phase transition */}
+      <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>The phase transition</div>
+      <div style={{ fontSize: 12.5, color: 'var(--text-secondary)', marginBottom: 14, lineHeight: 1.55 }}>
+        Real surplus is <strong>s_real = Y − L</strong> — what's left after you actually spend L on living. It stays
+        positive until L crosses break-even <strong>Y = {m0(Y)}</strong>, which sits just <strong>{m0(s)}</strong> above
+        your budget <strong>U</strong>. That gap is your entire margin for error: overspend the budget by more than the
+        surplus and you tip into the red, financing life on debt.
+      </div>
+
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block' }}>
+        {/* zones */}
+        <rect x={padL} y={padT} width={plotW} height={zeroY - padT} fill="var(--accent)" opacity="0.06" />
+        <rect x={padL} y={zeroY} width={plotW} height={padT + plotH - zeroY} fill="var(--red)" opacity="0.06" />
+        {/* zero line */}
+        <line x1={padL} y1={zeroY} x2={padL + plotW} y2={zeroY} stroke="var(--text-tertiary)" strokeWidth="1" strokeDasharray="4 3" />
+        <text x={padL - 8} y={zeroY + 4} textAnchor="end" fontSize="11" fill="var(--text-tertiary)">$0</text>
+        <text x={padL - 8} y={padT + 4} textAnchor="end" fontSize="11" fill="var(--accent-text)">{m0(ymax)}</text>
+        <text x={padL - 8} y={padT + plotH} textAnchor="end" fontSize="11" fill="var(--red)">{m0(ymin)}</text>
+        {/* s_real line */}
+        <line x1={xToPx(0)} y1={yToPx(sReal(0))} x2={xToPx(xmax)} y2={yToPx(sReal(xmax))} stroke="var(--text-primary)" strokeWidth="2" />
+        {/* markers */}
+        {markers.map((mk, i) => (
+          <g key={i}>
+            <line x1={xToPx(mk.x)} y1={padT} x2={xToPx(mk.x)} y2={padT + plotH} stroke={mk.color} strokeWidth="1.5" strokeDasharray="3 3" opacity="0.7" />
+            <circle cx={xToPx(mk.x)} cy={yToPx(sReal(mk.x))} r="4" fill={mk.color} />
+            <text x={xToPx(mk.x)} y={padT + plotH + 16} textAnchor={i === markers.length - 1 ? 'end' : 'middle'} fontSize="11" fontWeight="600" fill={mk.color}>{mk.label}</text>
+            <text x={xToPx(mk.x)} y={padT + plotH + 30} textAnchor={i === markers.length - 1 ? 'end' : 'middle'} fontSize="10" fill="var(--text-tertiary)">{m0(mk.x)}</text>
+          </g>
+        ))}
+      </svg>
+
+      {L != null && (
+        <div style={{ marginTop: 12, fontSize: 13, lineHeight: 1.55,
+          color: L > Y ? 'var(--red)' : 'var(--accent-text)' }}>
+          {L > Y
+            ? <>Right now you're spending <strong>{m0(L)}</strong> — <strong>{m0(L - Y)}</strong> past break-even. Real surplus is <strong>{m0(Y - L)}/mo</strong>, and that gap is landing on credit cards. The fix is to close the distance between L and U (spend less) or raise Y (trim a bill).</>
+            : <>You're spending <strong>{m0(L)}</strong>, under break-even — real surplus <strong>{m0(Y - L)}/mo</strong> is flowing to debt. Keep L below U to grow it.</>}
+        </div>
+      )}
+    </div>
+  )
+}
+
 const VIEWS = [
   { id: 'system', label: 'Your System' },
   { id: 'flow', label: 'Flow' },
@@ -497,6 +600,17 @@ export default function About({ active, navigate }) {
           </div>
         )}
       </div>
+
+      {/* The equation + phase transition */}
+      {!loading && !zoomed && (
+        <EquationSection
+          P={income} B={fixedBills} D={debtBills} C={savings}
+          U={dash?.committed_budget ?? 0}
+          s={dash?.budget_surplus}
+          Y={available}
+          L={dash?.actual_living_median}
+        />
+      )}
     </div>
   )
 }
