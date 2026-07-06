@@ -264,22 +264,32 @@ export default function Calendar({ active }) {
   const threshold    = data?.safe_spend_buffer ?? 200
   const dailyBalance = {}
   if (showBalance && data) {
-    if (isCurrentMonth && data.cash_flow_timeline?.length) {
-      const byDate = {}
-      for (const e of data.cash_flow_timeline) byDate[e.date] = e.balance
-      let last = data.bills_account_balance || 0
-      for (let d = now.getDate(); d <= daysInMonth; d++) {
-        const k = dateKey(d)
-        if (byDate[k] != null) last = byDate[k]
-        dailyBalance[d] = last
-      }
-    } else {
+    if (!isFutureMonth && !isCurrentMonth) {
+      // Past months: simple historical walk (the simulation only projects forward)
       let bal = data.bills_account_balance || 0
       for (let d = 1; d <= daysInMonth; d++) {
         const { bills, pays } = getDayData(d)
         for (const p of pays) bal += (p.amount || 0)
         for (const b of bills) { if (!isPaid(b)) bal -= (b.amount || 0) }
         dailyBalance[d] = bal
+      }
+    } else if (data.cash_flow_timeline?.length || isCurrentMonth) {
+      // Current + future months: ONE continuous walk from today through the end
+      // of the displayed month, carrying the running balance across month
+      // boundaries — July's projected month-end IS August 1st's starting point.
+      // The timeline comes from the same backend simulation as safe-to-transfer.
+      const byDate = {}
+      for (const e of (data.cash_flow_timeline || [])) byDate[e.date] = e.balance
+      let last = data.bills_account_balance || 0
+      const cursor = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+      const monthEnd = new Date(year, month - 1, daysInMonth)
+      while (cursor <= monthEnd) {
+        const k = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}-${String(cursor.getDate()).padStart(2, '0')}`
+        if (byDate[k] != null) last = byDate[k]
+        if (cursor.getFullYear() === year && cursor.getMonth() + 1 === month) {
+          dailyBalance[cursor.getDate()] = last
+        }
+        cursor.setDate(cursor.getDate() + 1)
       }
     }
   }

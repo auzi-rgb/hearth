@@ -857,6 +857,63 @@ def get_setting(conn, key: str, default=None):
     row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
     return row["value"] if row else default
 
+def cash_flow_projection(conn, end_date, start_balance=None) -> list:
+    """THE day-by-day projection of the Bills account, from today through
+    end_date: every unpaid bill occurrence (all monthly occurrences in the
+    window, not just the next one; weekly bills every week) and every projected
+    paycheck, in date order with a running balance. Single source for the
+    Dashboard's safe-to-transfer AND the Calendar's balance overlay — one
+    simulation, so months carry forward instead of each view restarting from
+    today's balance and disagreeing about the future."""
+    today = date.today()
+    if start_balance is None:
+        acct = find_role_account(conn, "bills", "bills")
+        start_balance = get_account_balance(conn, acct["id"]) if acct else 0.0
+    paid_lookup = {
+        (r["bill_id"], r["month"])
+        for r in conn.execute("SELECT bill_id, month FROM bill_paid_months").fetchall()
+    }
+    events = []
+    for b in conn.execute("SELECT * FROM bills WHERE is_active=1").fetchall():
+        amt = float(b["expected_amount"])
+        if b["frequency"] == "weekly" and b["day_of_week"] is not None:
+            for occ in weekly_occurrences(b["day_of_week"], today, end_date):
+                events.append((occ, -amt, b["name"], "bill"))
+        elif b["day_of_month"]:
+            y, m = today.year, today.month
+            while date(y, m, 1) <= end_date:
+                last_day = cal_mod.monthrange(y, m)[1]
+                occ = date(y, m, min(b["day_of_month"], last_day))
+                if today <= occ <= end_date and (b["id"], occ.strftime("%Y-%m")) not in paid_lookup:
+                    events.append((occ, -amt, b["name"], "bill"))
+                m += 1
+                if m > 12:
+                    m = 1
+                    y += 1
+    for member in get_household(conn):
+        info = detect_next_payday(conn, member["key"])
+        if info.get("next_date") and info.get("expected_amount"):
+            d = date.fromisoformat(info["next_date"])
+            amt = float(info["expected_amount"])
+            label = member.get("label") or member["key"].capitalize()
+            while d <= end_date:
+                if d >= today:
+                    events.append((d, amt, f"{label} paycheck", "income"))
+                d += timedelta(weeks=info.get("interval_weeks", 2))
+    events.sort(key=lambda x: x[0])
+    running = start_balance
+    timeline = []
+    for evt_date, delta, label, kind in events:
+        running += delta
+        timeline.append({
+            "date": evt_date.isoformat(),
+            "label": label,
+            "amount": round(delta, 2),
+            "balance": round(running, 2),
+            "kind": kind,
+        })
+    return timeline
+
 def find_role_account(conn, role: str, name_hint: str):
     """Resolve which account plays a special role (bills, food). An explicit
     setting ({role}_account_id, set on the Settings page) always wins; the legacy
@@ -1395,44 +1452,18 @@ async def dashboard():
     # fine. This is the same simulation used for overdraft_warnings below, so the
     # suggested transfer can never recommend moving out money that simulation
     # itself flags as needed to avoid an overdraft.
-    _sim_events = []
-    for b in upcoming_bills:
-        due = date.fromisoformat(b["due_date"])
-        if due >= today and not b.get("paid"):
-            _sim_events.append((due, -b["amount"], b["name"], "bill"))
-    member_labels = {m["key"]: m.get("label") or m["key"].capitalize() for m in members}
-    for _p, pay_info in pay_by_member.items():
-        if not pay_info.get("next_date") or not pay_info.get("expected_amount"):
-            continue
-        _d = date.fromisoformat(pay_info["next_date"])
-        _amt = float(pay_info["expected_amount"])
-        freq_weeks = pay_info.get("interval_weeks", 2)
-        while _d <= today + timedelta(days=60):
-            if _d >= today:
-                _sim_events.append((_d, _amt, f"{member_labels[_p]} paycheck", "income"))
-            _d += timedelta(weeks=freq_weeks)
-    _sim_events.sort(key=lambda x: x[0])
-    _running = bills_balance
+    cash_flow_timeline = cash_flow_projection(conn, today + timedelta(days=60), start_balance=bills_balance)
     min_balance = bills_balance
     overdraft_warnings = []
-    cash_flow_timeline = []
-    for _evt_date, _delta, _label, _kind in _sim_events:
-        _running += _delta
-        min_balance = min(min_balance, _running)
-        cash_flow_timeline.append({
-            "date": _evt_date.isoformat(),
-            "label": _label,
-            "amount": round(_delta, 2),
-            "balance": round(_running, 2),
-            "kind": _kind,
-        })
-        if _kind == "bill" and _running < safe_buffer:
+    for _e in cash_flow_timeline:
+        min_balance = min(min_balance, _e["balance"])
+        if _e["kind"] == "bill" and _e["balance"] < safe_buffer:
             overdraft_warnings.append({
-                "bill_name": _label,
-                "due_date": _evt_date.isoformat(),
-                "amount": abs(_delta),
-                "projected_balance": round(_running, 2),
-                "shortfall": round(safe_buffer - _running, 2),
+                "bill_name": _e["label"],
+                "due_date": _e["date"],
+                "amount": abs(_e["amount"]),
+                "projected_balance": _e["balance"],
+                "shortfall": round(safe_buffer - _e["balance"], 2),
             })
     # Reserve = however much of today's balance is needed to survive the lowest
     # future point without dropping below the buffer. Safe-to-transfer is whatever
@@ -1840,19 +1871,24 @@ async def calendar_data(month: str = None):
             })
     conn.close()
 
-    # Simulation overlay — only meaningful for the current month (it starts
-    # from today's balances). Same data the Dashboard's safe-to-transfer uses,
-    # so the Calendar's balance line can never disagree with it.
+    # Simulation overlay — one continuous projection from today through the
+    # END of the requested month, so balances carry forward across month
+    # boundaries instead of each month restarting from today's live balance.
+    # Same function the Dashboard's safe-to-transfer uses; they cannot disagree.
     sim_timeline = []
     low_point = None
     suggested_transfer = None
+    if month >= cur_month:
+        _conn2 = get_db()
+        sim_timeline = cash_flow_projection(_conn2, end)
+        _conn2.close()
+        _in_month = [e for e in sim_timeline if e["date"] >= start.isoformat()]
+        if _in_month:
+            _low = min(_in_month, key=lambda e: e["balance"])
+            low_point = {"date": _low["date"], "balance": _low["balance"], "label": _low["label"]}
     if month == cur_month:
         _dash = await dashboard()
-        sim_timeline = _dash.get("cash_flow_timeline") or []
         suggested_transfer = _dash.get("suggested_transfer")
-        if sim_timeline:
-            _low = min(sim_timeline, key=lambda e: e["balance"])
-            low_point = {"date": _low["date"], "balance": _low["balance"], "label": _low["label"]}
 
     return {
         "month":                  month,
