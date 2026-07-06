@@ -236,6 +236,15 @@ def init_db():
         conn.commit()
     except Exception:
         pass
+    try:
+        # Autopay: 1 = paid automatically from the Bills account, needs no human
+        # action (no paid-checkbox, no "looks paid" nag, muted in the calendar).
+        # Defaults to 1 because the household runs bills on autopay — the few
+        # manual ones get un-flagged. Only manual bills surface as action items.
+        conn.execute("ALTER TABLE bills ADD COLUMN autopay INTEGER NOT NULL DEFAULT 1")
+        conn.commit()
+    except Exception:
+        pass
     conn.execute("UPDATE bills SET frequency = 'monthly' WHERE frequency IS NULL")
     conn.commit()
     # One-time reclassification: savings/investment transfers that were entered
@@ -1715,6 +1724,7 @@ async def calendar_data(month: str = None):
                     "confidence": b["confidence"],
                     "bill_type":  b["bill_type"],
                     "payment_type": b["payment_type"] or "Recurring",
+                    "autopay":    bool(b["autopay"]),
                     "weekly":     True,
                     # One paid-mark can't represent several occurrences, so
                     # weekly bills never show as paid (same rule as dashboard)
@@ -1736,6 +1746,7 @@ async def calendar_data(month: str = None):
                 "confidence": b["confidence"],
                 "bill_type":  b["bill_type"],
                 "payment_type": b["payment_type"] or "Recurring",
+                "autopay":    bool(b["autopay"]),
                 "paid":       b["id"] in paid_set,
             })
     pay_rows = conn.execute(
@@ -1888,9 +1899,46 @@ async def calendar_data(month: str = None):
         if _in_month:
             _low = min(_in_month, key=lambda e: e["balance"])
             low_point = {"date": _low["date"], "balance": _low["balance"], "label": _low["label"]}
+    # Health block — the two questions the household actually monitors:
+    # (1) will the Bills account stay funded for autopay, and (2) are they
+    # overspending their living (Food) money. Bill-by-bill detail is noise
+    # when bills autopay; these two answers are the point.
+    health = None
     if month == cur_month:
         _dash = await dashboard()
         suggested_transfer = _dash.get("suggested_transfer")
+        _lp = _dash.get("safe_today")  # lowest projected balance minus buffer
+        _low_bal = low_point["balance"] if low_point else _dash.get("bills_balance")
+        if _dash.get("overdraft_warnings"):
+            bills_status = "danger"
+        elif _low_bal is not None and _low_bal < safe_buffer:
+            bills_status = "tight"
+        else:
+            bills_status = "ok"
+        allowance = _dash.get("food_daily_allowance")
+        pace = _dash.get("food_daily_pace")
+        food_bal = _dash.get("food_balance")
+        runway_days = None
+        if food_bal is not None and pace and pace > 0:
+            runway_days = int(food_bal / pace)
+        if allowance is not None and pace is not None and pace > allowance * 1.1:
+            living_status = "over"
+        else:
+            living_status = "ok"
+        health = {
+            "bills_status": bills_status,
+            "bills_balance": _dash.get("bills_balance"),
+            "low_point": low_point,
+            "safe_buffer": safe_buffer,
+            "overdraft_warnings": _dash.get("overdraft_warnings") or [],
+            "suggested_transfer": suggested_transfer,
+            "days_until_transfer": _dash.get("days_until_next_transfer"),
+            "living_status": living_status,
+            "food_balance": food_bal,
+            "food_daily_allowance": allowance,
+            "food_daily_pace": pace,
+            "runway_days": runway_days,
+        }
 
     return {
         "month":                  month,
@@ -1905,6 +1953,7 @@ async def calendar_data(month: str = None):
         "cash_flow_timeline":     sim_timeline,
         "low_point":              low_point,
         "suggested_transfer":     suggested_transfer,
+        "health":                 health,
     }
 
 @router.get("/api/transactions")
@@ -1996,8 +2045,8 @@ async def create_bill(request: Request):
     body = await request.json()
     conn = get_db()
     cur = conn.execute(
-        "INSERT INTO bills (name, display_name, expected_amount, confidence, day_of_month, account_id, bill_type, payment_type, from_debt_budget, linked_loan_id, linked_account_id, notes, is_active) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1)",
-        (body["name"], body.get("display_name") or None, body["expected_amount"], body.get("confidence", "fixed"), body.get("day_of_month"), body.get("account_id"), body.get("bill_type"), body.get("payment_type", "Recurring"), int(body.get("from_debt_budget") or 0), body.get("linked_loan_id"), body.get("linked_account_id"), body.get("notes"))
+        "INSERT INTO bills (name, display_name, expected_amount, confidence, day_of_month, account_id, bill_type, payment_type, from_debt_budget, linked_loan_id, linked_account_id, notes, autopay, is_active) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
+        (body["name"], body.get("display_name") or None, body["expected_amount"], body.get("confidence", "fixed"), body.get("day_of_month"), body.get("account_id"), body.get("bill_type"), body.get("payment_type", "Recurring"), int(body.get("from_debt_budget") or 0), body.get("linked_loan_id"), body.get("linked_account_id"), body.get("notes"), int(body.get("autopay", 1)))
     )
     conn.commit()
     bid = cur.lastrowid
@@ -2009,8 +2058,8 @@ async def update_bill(bill_id: int, request: Request):
     body = await request.json()
     conn = get_db()
     conn.execute(
-        "UPDATE bills SET name=?, display_name=?, expected_amount=?, confidence=?, day_of_month=?, account_id=?, bill_type=?, payment_type=?, from_debt_budget=?, linked_loan_id=?, linked_account_id=?, notes=? WHERE id=?",
-        (body["name"], body.get("display_name") or None, body["expected_amount"], body.get("confidence", "fixed"), body.get("day_of_month"), body.get("account_id"), body.get("bill_type"), body.get("payment_type", "Recurring"), int(body.get("from_debt_budget") or 0), body.get("linked_loan_id"), body.get("linked_account_id"), body.get("notes"), bill_id)
+        "UPDATE bills SET name=?, display_name=?, expected_amount=?, confidence=?, day_of_month=?, account_id=?, bill_type=?, payment_type=?, from_debt_budget=?, linked_loan_id=?, linked_account_id=?, notes=?, autopay=? WHERE id=?",
+        (body["name"], body.get("display_name") or None, body["expected_amount"], body.get("confidence", "fixed"), body.get("day_of_month"), body.get("account_id"), body.get("bill_type"), body.get("payment_type", "Recurring"), int(body.get("from_debt_budget") or 0), body.get("linked_loan_id"), body.get("linked_account_id"), body.get("notes"), int(body.get("autopay", 1)), bill_id)
     )
     conn.commit()
     conn.close()

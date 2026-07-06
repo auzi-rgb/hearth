@@ -228,6 +228,16 @@ Code-only (change requires an edit here + main.py/sync.py):
 - Schedule: sync 2:00am, net-worth 3:00am, backup 3:30am (keep 14), coach 3:45am, monthly report 1st 4:00am
 - Infra: `GATEWAY_URL` hardcoded in main.py and sync.py; JWT expiry 8h; AI num_ctx 8192 (chat) / 4096 (coach)
 
+## Calendar reframe (Session 8+, autopay model)
+
+The household runs bills on **autopay** from a funded Bills account, so the bill-by-bill ledger is noise. The calendar is built around the two questions they actually monitor:
+1. **Is Bills funded?** — will autopay bounce? = the projected low point of the Bills account (`cash_flow_projection` → `low_point`).
+2. **Are we overspending living money?** — Food account balance vs sustainable pace (`food_daily_allowance` vs `food_daily_pace`, `runway_days`).
+
+- `bills.autopay` column (default **1**). Autopay bills: no paid-checkbox, no "looks paid" confirmation nag, muted/faded on the calendar grid, show an "auto" tag in day detail. Manual bills (autopay=0, tagged MANUAL on Bills page) keep the paid workflow and surface in the calendar sidebar's "Needs you" list.
+- `GET /api/calendar` returns a `health` block (current month only): `bills_status` (ok/tight/danger), `low_point`, `overdraft_warnings`, `suggested_transfer`, `living_status` (ok/over), `food_balance`, `food_daily_allowance/pace`, `runway_days`, `days_until_transfer`.
+- Calendar sidebar bottom = **health panel** (Bills funded? + Living money? + transfer action + manual-bill action items), NOT an itemized agenda (tried that in the list-view sidebar; itemizing autopay bills was noise the household explicitly rejected). Grid/list view toggle and per-day detail (top of sidebar, capped height) remain.
+
 ## Known Issues (from Session 6 QC review — not yet fixed)
 
 1. **Sync fuzzy dedup can drop real transactions** — same account + amount within 1 day with different descriptions is treated as a duplicate (sync.py). Two distinct same-priced purchases on the same day → second one never imported.

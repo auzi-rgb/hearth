@@ -64,6 +64,7 @@ function BillModal({ bill, loans, debtAccounts, allBills, onClose, onSaved }) {
     day_of_month:    bill?.day_of_month    != null   ? String(bill.day_of_month)    : '',
     confidence:      bill?.confidence                ?? 'fixed',
     notes:           bill?.notes                     ?? '',
+    autopay:         bill?.autopay != null ? !!bill.autopay : true,
     linked_loan_id:    bill?.linked_loan_id    ?? null,
     linked_account_id: bill?.linked_account_id ?? null,
   })
@@ -129,6 +130,7 @@ function BillModal({ bill, loans, debtAccounts, allBills, onClose, onSaved }) {
         day_of_month:    parseInt(form.day_of_month),
         confidence:      form.confidence,
         notes:           form.notes.trim() || null,
+        autopay:         form.autopay ? 1 : 0,
         linked_loan_id:    (finalPaymentType === 'Loan' || finalPaymentType === 'Debt') ? (form.linked_loan_id || null) : null,
         linked_account_id: (finalPaymentType === 'Loan' || finalPaymentType === 'Debt') ? (form.linked_account_id || null) : null,
       }
@@ -284,6 +286,18 @@ function BillModal({ bill, loans, debtAccounts, allBills, onClose, onSaved }) {
               onChange={e => setField('notes', e.target.value)}
               placeholder="Any notes…" style={{ width: '100%' }} />
           </div>
+
+          <label style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', marginTop: 4 }}>
+            <input type="checkbox" checked={form.autopay}
+              onChange={e => setField('autopay', e.target.checked)}
+              style={{ accentColor: 'var(--accent)', cursor: 'pointer', width: 16, height: 16 }} />
+            <span>
+              <span style={{ fontSize: 13, fontWeight: 500 }}>Autopay</span>
+              <span style={{ fontSize: 12, color: 'var(--text-tertiary)', marginLeft: 8 }}>
+                Paid automatically — Hearth won't ask you to confirm it and mutes it on the Calendar
+              </span>
+            </span>
+          </label>
         </div>
 
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 20 }}>
@@ -578,6 +592,13 @@ export default function Bills({ active }) {
                           background: 'rgba(255,149,0,0.12)', borderRadius: 4, padding: '1px 5px',
                           flexShrink: 0, letterSpacing: '0.02em' }} title="Charged every week, not once a month">
                           WEEKLY
+                        </span>
+                      )}
+                      {bill.autopay === 0 && (
+                        <span style={{ fontSize: 10, fontWeight: 700, color: '#7c3aed',
+                          background: 'rgba(124,58,237,0.12)', borderRadius: 4, padding: '1px 5px',
+                          flexShrink: 0, letterSpacing: '0.02em' }} title="Paid manually — Hearth surfaces it as an action item">
+                          MANUAL
                         </span>
                       )}
                     </div>

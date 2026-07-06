@@ -322,33 +322,16 @@ export default function Calendar({ active }) {
   const selKey   = selected ? dateKey(selected) : null
   const selData  = selected ? getDayData(selected) : null
 
-  // ── Upcoming agenda (persistent sidebar bottom) ──
-  // Chronological list of what's coming: bills + paychecks (from the same
-  // carried-forward simulation, each with its running balance) merged with
-  // scheduled/recorded transfer days. This is the list view of the calendar,
-  // always visible so the sidebar is never empty.
+  // ── Health panel data (persistent sidebar bottom) ──
+  // The household runs bills on autopay from a funded Bills account, so the
+  // bill-by-bill ledger is noise. Two questions matter: is Bills funded enough
+  // for autopay, and are we overspending our living (Food) money. Manual
+  // (non-autopay) bills are the only ones that need a human.
   const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
-  const agenda = (() => {
-    if (!data) return []
-    const items = []
-    for (const e of (data.cash_flow_timeline || [])) {
-      if (e.date >= todayKey) items.push({ date: e.date, label: e.label, amount: e.amount, balance: e.balance, kind: e.kind })
-    }
-    for (const x of (data.transfer_events || [])) {
-      if (x.date >= todayKey) items.push({
-        date: x.date, label: x.recorded ? 'Transfer recorded' : 'Transfer day',
-        amount: x.recorded ? -(x.amount || 0) : null, balance: null, kind: 'transfer',
-      })
-    }
-    items.sort((a, b) => a.date.localeCompare(b.date) || (a.kind === 'income' ? -1 : 1))
-    return items.slice(0, 40)
-  })()
-
-  function agendaColor(kind) {
-    if (kind === 'income') return A.income
-    if (kind === 'transfer') return A.transfer
-    return A.billUp
-  }
+  const health = data?.health || null
+  const manualUpcoming = (data?.bill_events || [])
+    .filter(e => e.autopay === false && !e.paid && e.date >= todayKey)
+    .sort((a, b) => a.date.localeCompare(b.date))
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -691,7 +674,10 @@ export default function Calendar({ active }) {
                   {/* Bill chips */}
                   {bills.slice(0, bVis).map((b, j) => {
                     const status = billStatus(b, d)
-                    const sug = status !== 'paid' ? suggestionByBill[b.id] : null
+                    // "Looks paid" confirmation is only for MANUAL bills — autopay
+                    // needs no human confirmation, so no ✓? nag. Autopay bills are
+                    // muted so manual ones (the ones needing attention) stand out.
+                    const sug = status !== 'paid' && !b.autopay ? suggestionByBill[b.id] : null
                     return (
                       <Chip
                         key={`b-${j}`}
@@ -700,7 +686,7 @@ export default function Calendar({ active }) {
                         label={b.name + (sug ? ' ✓?' : '')}
                         strikethrough={status === 'paid'}
                         dashed={status === 'future'}
-                        faded={status === 'future'}
+                        faded={status === 'future' || (b.autopay && status !== 'paid')}
                         onClick={e => togglePaid(b, e)}
                       />
                     )
@@ -861,26 +847,35 @@ export default function Calendar({ active }) {
                       const status = billStatus(b, selected)
                       const accent = billAccent(status, b)
                       const paid   = isPaid(b)
-                      const sug    = !paid ? suggestionByBill[b.id] : null
+                      // Autopay bills need no confirmation — no "looks paid" nag.
+                      const sug    = !paid && !b.autopay ? suggestionByBill[b.id] : null
                       return (
-                        <div key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <div key={i} style={{ borderBottom: '1px solid var(--border)', opacity: b.autopay && !paid ? 0.7 : 1 }}>
                           <div style={{
                             display: 'flex', alignItems: 'center',
                             minHeight: 40, gap: 10,
                           }}>
-                            {/* Paid checkbox */}
-                            <button
-                              onClick={e => togglePaid(b, e)}
-                              title={paid ? 'Mark unpaid' : 'Mark paid'}
-                              style={{
-                                width: 18, height: 18, borderRadius: 4, flexShrink: 0,
-                                border: `1.5px solid ${accent}`,
-                                background: paid ? accent : 'transparent',
-                                cursor: 'pointer', display: 'flex', alignItems: 'center',
-                                justifyContent: 'center', fontSize: 10, color: '#fff',
-                                transition: 'all 0.15s',
-                              }}
-                            >{paid ? '✓' : ''}</button>
+                            {/* Autopay bills show an 'auto' tag; manual bills get the paid checkbox */}
+                            {b.autopay ? (
+                              <span title="Paid automatically from the Bills account" style={{
+                                fontSize: 9, fontWeight: 700, letterSpacing: '0.03em', flexShrink: 0,
+                                color: 'var(--text-tertiary)', border: '1px solid var(--border)',
+                                borderRadius: 4, padding: '2px 4px', textTransform: 'uppercase',
+                              }}>auto</span>
+                            ) : (
+                              <button
+                                onClick={e => togglePaid(b, e)}
+                                title={paid ? 'Mark unpaid' : 'Mark paid'}
+                                style={{
+                                  width: 18, height: 18, borderRadius: 4, flexShrink: 0,
+                                  border: `1.5px solid ${accent}`,
+                                  background: paid ? accent : 'transparent',
+                                  cursor: 'pointer', display: 'flex', alignItems: 'center',
+                                  justifyContent: 'center', fontSize: 10, color: '#fff',
+                                  transition: 'all 0.15s',
+                                }}
+                              >{paid ? '✓' : ''}</button>
+                            )}
                             <span style={{
                               flex: 1, fontSize: 13, fontWeight: 500, minWidth: 0,
                               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
@@ -966,59 +961,103 @@ export default function Calendar({ active }) {
             </div>
           )}
 
-          {/* ── Bottom zone: always-visible Upcoming agenda ── */}
-          <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-            <SectionHead>Upcoming</SectionHead>
-            <div style={{ flex: 1, overflowY: 'auto', marginTop: 4 }}>
-              {agenda.length === 0 && (
-                <div style={{ fontSize: 12, color: 'var(--text-tertiary)', padding: '12px 0' }}>
-                  Nothing in the projection window.
-                </div>
-              )}
-              {agenda.map((it, i) => {
-                const showDate = i === 0 || agenda[i - 1].date !== it.date
-                const dObj = new Date(it.date + 'T12:00:00')
-                return (
-                  <div key={i} style={{
-                    display: 'flex', gap: 8, alignItems: 'baseline',
-                    padding: '5px 0', borderBottom: '1px solid var(--border)',
-                  }}>
-                    <div style={{
-                      width: 40, flexShrink: 0, fontSize: 11, textAlign: 'right',
-                      color: 'var(--text-tertiary)', visibility: showDate ? 'visible' : 'hidden',
-                    }}>
-                      {dObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                    </div>
-                    <div style={{
-                      flex: 1, minWidth: 0, fontSize: 12.5,
-                      borderLeft: `3px solid ${agendaColor(it.kind)}`, paddingLeft: 8,
-                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                      color: 'var(--text-primary)',
-                    }}>
-                      {it.label}
-                    </div>
-                    <div style={{ flexShrink: 0, textAlign: 'right' }}>
-                      {it.amount != null && (
-                        <div style={{
-                          fontSize: 12.5, fontWeight: 600, fontVariantNumeric: 'tabular-nums',
-                          color: it.kind === 'income' ? A.income : it.amount < 0 ? A.billPast : 'var(--text-secondary)',
-                        }}>
-                          {it.amount > 0 ? '+' : ''}{money(it.amount)}
-                        </div>
-                      )}
-                      {it.balance != null && (
-                        <div style={{
-                          fontSize: 11, fontVariantNumeric: 'tabular-nums',
-                          color: it.balance < threshold ? A.billPast : 'var(--text-tertiary)',
-                        }}>
-                          {money(it.balance)}
-                        </div>
-                      )}
-                    </div>
+          {/* ── Bottom zone: health panel — the two questions that matter ── */}
+          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 14 }}>
+            {!health ? (
+              <div style={{ fontSize: 12, color: 'var(--text-tertiary)', paddingTop: 8 }}>
+                Health check is shown for the current month.
+              </div>
+            ) : (
+              <>
+                {/* Q1: Is there enough in Bills for autopay? */}
+                <div style={{ padding: '12px 14px', borderRadius: 10,
+                  background: health.bills_status === 'ok' ? 'rgba(22,163,74,0.06)' : health.bills_status === 'tight' ? 'rgba(217,119,6,0.07)' : 'rgba(220,38,38,0.07)',
+                  border: `1px solid ${health.bills_status === 'ok' ? 'rgba(22,163,74,0.25)' : health.bills_status === 'tight' ? 'rgba(217,119,6,0.3)' : 'rgba(220,38,38,0.3)'}` }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-tertiary)' }}>Bills funded?</span>
+                    <span style={{ fontSize: 12, fontWeight: 700,
+                      color: health.bills_status === 'ok' ? A.income : health.bills_status === 'tight' ? '#d97706' : A.billPast }}>
+                      {health.bills_status === 'ok' ? '✓ Covered' : health.bills_status === 'tight' ? '⚠ Tight' : '✕ Short'}
+                    </span>
                   </div>
-                )
-              })}
-            </div>
+                  <div style={{ fontSize: 13, color: 'var(--text-primary)', lineHeight: 1.5 }}>
+                    {health.bills_status === 'danger'
+                      ? `Autopay may bounce — ${health.overdraft_warnings[0]?.bill_name} on ${new Date(health.overdraft_warnings[0]?.due_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. Add ${money(health.overdraft_warnings[0]?.shortfall)}.`
+                      : health.low_point
+                        ? <>Lowest point <strong>{money(health.low_point.balance)}</strong> on {new Date(health.low_point.date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} (after {health.low_point.label}). {health.bills_status === 'ok' ? 'Autopay is covered.' : `Below your ${money(health.safe_buffer)} buffer.`}</>
+                        : 'Bills account is funded.'}
+                  </div>
+                </div>
+
+                {/* Q2: Are we overspending our living money? */}
+                <div style={{ padding: '12px 14px', borderRadius: 10,
+                  background: health.living_status === 'over' ? 'rgba(220,38,38,0.07)' : 'rgba(22,163,74,0.06)',
+                  border: `1px solid ${health.living_status === 'over' ? 'rgba(220,38,38,0.3)' : 'rgba(22,163,74,0.25)'}` }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-tertiary)' }}>Living money</span>
+                    <span style={{ fontSize: 12, fontWeight: 700, color: health.living_status === 'over' ? A.billPast : A.income }}>
+                      {health.living_status === 'over' ? '⚠ Over pace' : '✓ On track'}
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
+                    <span style={{ color: 'var(--text-secondary)' }}>Food account</span>
+                    <span style={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{money(health.food_balance)}</span>
+                  </div>
+                  {health.food_daily_pace != null && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>Spending / sustainable</span>
+                      <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+                        <span style={{ color: health.living_status === 'over' ? A.billPast : 'var(--text-primary)', fontWeight: 600 }}>{money(health.food_daily_pace)}</span>
+                        <span style={{ color: 'var(--text-tertiary)' }}> / {money(health.food_daily_allowance)}/day</span>
+                      </span>
+                    </div>
+                  )}
+                  {health.runway_days != null && (
+                    <div style={{ fontSize: 12.5, color: health.living_status === 'over' ? A.billPast : 'var(--text-secondary)', marginTop: 6, lineHeight: 1.5 }}>
+                      {health.living_status === 'over'
+                        ? `At this pace, ~${health.runway_days} day${health.runway_days === 1 ? '' : 's'} of food money left — but the next transfer is ${health.days_until_transfer} days away. Ease off or you'll dip into credit.`
+                        : `~${health.runway_days} days of runway, next transfer in ${health.days_until_transfer} days. Comfortable.`}
+                    </div>
+                  )}
+                </div>
+
+                {/* Action: transfer */}
+                {health.suggested_transfer > 0 && (
+                  <div style={{ padding: '12px 14px', borderRadius: 10, background: 'var(--bg-subtle)', border: '1px solid var(--border)' }}>
+                    <div style={{ fontSize: 13, marginBottom: 8 }}>
+                      Safe to transfer to Food: <strong style={{ color: A.transfer }}>{money(health.suggested_transfer)}</strong>
+                      <span style={{ color: 'var(--text-tertiary)' }}> · next transfer day in {health.days_until_transfer}d</span>
+                    </div>
+                    <button
+                      onClick={() => recordTransfer(health.suggested_transfer, todayKey)}
+                      disabled={recordingXfer}
+                      className="apple-btn-primary"
+                      style={{ fontSize: 12, width: '100%' }}
+                      title="Records this amount as moved from Bills to Food today"
+                    >
+                      {recordingXfer ? '…' : `Record transfer of ${money(health.suggested_transfer)}`}
+                    </button>
+                  </div>
+                )}
+
+                {/* Action: manual (non-autopay) bills needing a human */}
+                {manualUpcoming.length > 0 && (
+                  <div>
+                    <SectionHead>Needs you (not autopay)</SectionHead>
+                    {manualUpcoming.map((b, i) => (
+                      <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 0', borderBottom: '1px solid var(--border)' }}>
+                        <button onClick={e => togglePaid(b, e)} title="Mark paid"
+                          style={{ width: 16, height: 16, borderRadius: 4, flexShrink: 0, cursor: 'pointer',
+                            border: `1.5px solid ${A.billUp}`, background: 'transparent' }} />
+                        <span style={{ flex: 1, fontSize: 12.5, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.name}</span>
+                        <span style={{ fontSize: 11, color: 'var(--text-tertiary)', flexShrink: 0 }}>{new Date(b.date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
+                        <span style={{ fontSize: 12.5, fontWeight: 700, flexShrink: 0 }}>{money(b.amount)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
           </div>
         </div>
       </div>
