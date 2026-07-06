@@ -275,9 +275,11 @@ html, body, #root {
   .calendar-sidebar {
     width: 100% !important;
     min-width: 0 !important;
-    max-height: 280px;
+    max-height: 340px;
     flex-shrink: 0;
   }
+  /* Legend is decorative — reclaim the vertical space on the cramped grid */
+  .calendar-legend { display: none !important; }
 
   /* ── Spending donut+legend — stack vertically ── */
   .donut-legend-row { flex-direction: column !important; align-items: stretch !important; }

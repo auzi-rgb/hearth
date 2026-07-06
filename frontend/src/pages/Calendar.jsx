@@ -407,8 +407,8 @@ export default function Calendar({ active }) {
 
         <div style={{ flex: 1 }} />
 
-        {/* Legend */}
-        <div style={{
+        {/* Legend — hidden on mobile to save vertical space above the grid */}
+        <div className="calendar-legend" style={{
           display: 'flex', gap: 'clamp(8px, 1vw, 14px)',
           fontSize: t.banner, color: 'var(--text-secondary)',
           flexShrink: 0, flexWrap: 'wrap', alignItems: 'center',

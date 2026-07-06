@@ -276,7 +276,7 @@ function EquationSection({ P, B, D, C, U, s, Y, L }) {
   ]
 
   return (
-    <div className="apple-card" style={{ padding: '28px 32px', marginTop: 20 }}>
+    <div className="apple-card" style={{ padding: 'clamp(18px, 4vw, 32px)', marginTop: 20 }}>
       <div style={{ fontSize: 18, fontWeight: 700, letterSpacing: '-0.02em', marginBottom: 4 }}>The household equation</div>
       <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 20 }}>
         Every page in Hearth obeys one line. Income comes in; four forces pull off the top; what survives is surplus.
@@ -446,7 +446,7 @@ export default function About({ active, navigate }) {
     : null
 
   return (
-    <div style={{ padding: 28, maxWidth: 1020, margin: '0 auto', width: '100%' }}>
+    <div style={{ padding: 'clamp(16px, 4vw, 28px)', maxWidth: 1020, margin: '0 auto', width: '100%', boxSizing: 'border-box' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', flexWrap: 'wrap', gap: 12, marginBottom: 20 }}>
         <div>
           <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em' }}>How Hearth works</div>

@@ -509,14 +509,15 @@ export default function Bills({ active }) {
         </div>
       )}
 
-      {/* Table */}
-      <div className="apple-card" style={{ padding: '8px 16px' }}>
+      {/* Table — horizontal scroll on narrow screens so the 9 fixed columns
+          (incl. Edit/Delete on the right) are never clipped off-screen on mobile */}
+      <div className="apple-card" style={{ padding: '8px 16px', overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
         {bills.length === 0 ? (
           <div style={{ padding: '40px 0', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 13 }}>
             No bills yet — click <strong>+ Add Bill</strong> to get started.
           </div>
         ) : (
-          <>
+          <div style={{ minWidth: 620 }}>
             {BILL_GROUPS.map(group => {
             const rows = sorted.filter(b => group.types.includes(b.payment_type || 'Recurring'))
             if (rows.length === 0) return null
@@ -655,7 +656,7 @@ export default function Bills({ active }) {
               </div>
             )
             })}
-          </>
+          </div>
         )}
       </div>
 
