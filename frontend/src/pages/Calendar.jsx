@@ -100,6 +100,9 @@ export default function Calendar({ active }) {
   const [showPeriods, setShowPeriods] = useState(true)
   const [billsPaid,   setBillsPaid]   = useState({})
   const [recordingXfer, setRecordingXfer] = useState(false)
+  const [viewMode,    setViewMode]    = useState(() => localStorage.getItem('hearth_calendar_view') || 'grid')
+
+  function pickView(v) { setViewMode(v); localStorage.setItem('hearth_calendar_view', v) }
 
   const monthStr       = `${year}-${String(month).padStart(2, '0')}`
   const isCurrentMonth = year === now.getFullYear() && month === now.getMonth() + 1
@@ -319,16 +322,33 @@ export default function Calendar({ active }) {
   const selKey   = selected ? dateKey(selected) : null
   const selData  = selected ? getDayData(selected) : null
 
-  // Sidebar cash flow
-  const selFlow = selData ? (() => {
-    const income   = selData.pays.reduce((s, p) => s + (p.amount || 0), 0)
-    const billsOut = selData.bills.filter(b => !isPaid(b)).reduce((s, b) => s + (b.amount || 0), 0)
-    const txnOut   = selData.txns.filter(t => t.amount < 0).reduce((s, t) => s + Math.abs(t.amount), 0)
-    const txnIn    = selData.txns.filter(t => t.amount > 0).reduce((s, t) => s + t.amount, 0)
-    const totalIn  = income + txnIn
-    const totalOut = billsOut + txnOut
-    return { in: totalIn, out: totalOut, net: totalIn - totalOut }
-  })() : null
+  // ── Upcoming agenda (persistent sidebar bottom) ──
+  // Chronological list of what's coming: bills + paychecks (from the same
+  // carried-forward simulation, each with its running balance) merged with
+  // scheduled/recorded transfer days. This is the list view of the calendar,
+  // always visible so the sidebar is never empty.
+  const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+  const agenda = (() => {
+    if (!data) return []
+    const items = []
+    for (const e of (data.cash_flow_timeline || [])) {
+      if (e.date >= todayKey) items.push({ date: e.date, label: e.label, amount: e.amount, balance: e.balance, kind: e.kind })
+    }
+    for (const x of (data.transfer_events || [])) {
+      if (x.date >= todayKey) items.push({
+        date: x.date, label: x.recorded ? 'Transfer recorded' : 'Transfer day',
+        amount: x.recorded ? -(x.amount || 0) : null, balance: null, kind: 'transfer',
+      })
+    }
+    items.sort((a, b) => a.date.localeCompare(b.date) || (a.kind === 'income' ? -1 : 1))
+    return items.slice(0, 40)
+  })()
+
+  function agendaColor(kind) {
+    if (kind === 'income') return A.income
+    if (kind === 'transfer') return A.transfer
+    return A.billUp
+  }
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -368,6 +388,19 @@ export default function Calendar({ active }) {
         >
           💰 {showBalance ? 'Balance On' : 'Show Balance'}
         </button>
+
+        {/* Grid / list view toggle */}
+        <div style={{ display: 'flex', background: 'var(--bg-subtle)', borderRadius: 20, padding: 3, gap: 2, flexShrink: 0 }}>
+          {[['grid', '▦ Grid'], ['list', '☰ List']].map(([m, label]) => (
+            <button key={m} onClick={() => pickView(m)} style={{
+              fontSize: t.banner, fontFamily: 'inherit', cursor: 'pointer', padding: '3px 11px', borderRadius: 18,
+              border: 'none', fontWeight: viewMode === m ? 600 : 400,
+              background: viewMode === m ? 'var(--bg-card)' : 'transparent',
+              color: viewMode === m ? 'var(--text-primary)' : 'var(--text-secondary)',
+              boxShadow: viewMode === m ? '0 1px 2px rgba(0,0,0,0.1)' : 'none',
+            }}>{label}</button>
+          ))}
+        </div>
 
         {/* Pay-period bands toggle */}
         <button
@@ -471,6 +504,69 @@ export default function Calendar({ active }) {
           padding: 'clamp(8px, 0.8vw, 12px)', overflow: 'hidden', minWidth: 0,
         }}>
 
+         {viewMode === 'list' ? (
+          <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
+            {Array.from({ length: daysInMonth }, (_, i) => i + 1).map(d => {
+              const { txns, bills, pays, xfers } = getDayData(d)
+              if (!txns.length && !bills.length && !pays.length && !xfers.length) return null
+              const isToday = isCurrentMonth && d === todayNum
+              const dow = new Date(year, month - 1, d).toLocaleDateString('en-US', { weekday: 'short' })
+              return (
+                <div key={d} onClick={() => setSelected(d)} style={{
+                  display: 'flex', gap: 14, padding: '10px 8px', cursor: 'pointer',
+                  borderBottom: '1px solid var(--border)',
+                  background: d === selected ? 'rgba(59,130,246,0.06)' : isToday ? 'rgba(22,163,74,0.05)' : 'transparent',
+                }}>
+                  <div style={{ width: 46, flexShrink: 0, textAlign: 'center' }}>
+                    <div style={{ fontSize: 11, color: 'var(--text-tertiary)', textTransform: 'uppercase' }}>{dow}</div>
+                    <div style={{ fontSize: 18, fontWeight: isToday ? 700 : 500, color: isToday ? A.income : 'var(--text-primary)' }}>{d}</div>
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                    {pays.map((p, j) => (
+                      <div key={`p${j}`} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 13 }}>
+                        <span style={{ borderLeft: `3px solid ${p.projected ? A.incFaded : A.income}`, paddingLeft: 8, textTransform: 'capitalize' }}>
+                          {p.person}{p.projected ? ' (est.)' : ''}
+                        </span>
+                        <span style={{ color: A.income, fontWeight: 600, flexShrink: 0 }}>{money(p.amount)}</span>
+                      </div>
+                    ))}
+                    {xfers.map((x, j) => (
+                      <div key={`x${j}`} style={{ fontSize: 13, borderLeft: `3px solid ${A.transfer}`, paddingLeft: 8 }}>
+                        {x.recorded ? `Transfer recorded ${money(x.amount)}` : 'Transfer day'}
+                      </div>
+                    ))}
+                    {bills.map((b, j) => {
+                      const status = billStatus(b, d)
+                      return (
+                        <div key={`b${j}`} onClick={e => togglePaid(b, e)} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 13 }}>
+                          <span style={{
+                            borderLeft: `3px solid ${billAccent(status, b)}`, paddingLeft: 8,
+                            color: status === 'paid' ? 'var(--text-tertiary)' : 'var(--text-primary)',
+                            textDecoration: status === 'paid' ? 'line-through' : 'none',
+                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          }}>{b.name}{suggestionByBill[b.id] && status !== 'paid' ? ' ✓?' : ''}</span>
+                          <span style={{ color: billAccent(status, b), fontWeight: 600, flexShrink: 0 }}>{money(b.amount)}</span>
+                        </div>
+                      )
+                    })}
+                    {txns.length > 0 && (
+                      <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
+                        {txns.length} transaction{txns.length !== 1 ? 's' : ''} · {money(txns.reduce((s, tx) => s + tx.amount, 0))} net
+                      </div>
+                    )}
+                  </div>
+                  {showBalance && dailyBalance[d] !== undefined && (
+                    <div style={{ flexShrink: 0, alignSelf: 'center', fontSize: 13, fontWeight: 600, fontVariantNumeric: 'tabular-nums',
+                      color: dailyBalance[d] < threshold ? A.billPast : 'var(--text-tertiary)' }}>
+                      {money(dailyBalance[d])}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+         ) : (
+          <>
           {/* Day-of-week headers */}
           <div style={{
             display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)',
@@ -649,28 +745,23 @@ export default function Calendar({ active }) {
               )
             })}
           </div>
+          </>
+         )}
         </div>
 
         {/* ── Detail sidebar ── */}
         <div className="apple-card calendar-sidebar" style={{
-          width: 'clamp(210px, 21vw, 300px)', flexShrink: 0,
+          width: 'clamp(240px, 24vw, 340px)', flexShrink: 0,
           display: 'flex', flexDirection: 'column',
           padding: 16, overflow: 'hidden',
         }}>
 
-          {!selected ? (
-            <div style={{
-              flex: 1, display: 'flex', flexDirection: 'column',
-              alignItems: 'center', justifyContent: 'center',
-              gap: 10, color: 'var(--text-tertiary)', textAlign: 'center',
-            }}>
-              <div style={{ fontSize: 32 }}>📅</div>
-              <div style={{ fontSize: 13 }}>Click any day to see its details</div>
-            </div>
-          ) : (
-            <>
+          {/* ── Top zone: selected-day detail (capped ~4 cards, then scrolls) ── */}
+          {selected && (
+            <div style={{ flexShrink: 0, maxHeight: 340, display: 'flex', flexDirection: 'column',
+              marginBottom: 14, paddingBottom: 14, borderBottom: '1px solid var(--border)', overflow: 'hidden' }}>
               {/* Date heading */}
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16, flexShrink: 0 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, flexShrink: 0 }}>
                 <div style={{ fontSize: 15, fontWeight: 700, lineHeight: 1.3, color: 'var(--text-primary)' }}>
                   {new Date(selKey + 'T12:00:00').toLocaleDateString('en-US', {
                     weekday: 'long', month: 'long', day: 'numeric',
@@ -872,38 +963,63 @@ export default function Calendar({ active }) {
                   </div>
                 )}
               </div>
+            </div>
+          )}
 
-              {/* Net for the day — elevated card */}
-              {selFlow && (selFlow.in > 0 || selFlow.out > 0) && (
-                <div style={{
-                  marginTop: 14, flexShrink: 0,
-                  padding: '12px 14px',
-                  background: 'var(--bg-subtle)',
-                  border: '1px solid var(--border)',
-                  borderRadius: 8,
-                  boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
-                }}>
-                  <div style={{
-                    fontSize: 11, fontWeight: 600,
-                    textTransform: 'uppercase', letterSpacing: '0.05em',
-                    color: 'var(--text-tertiary)', marginBottom: 6,
-                  }}>
-                    Net for the day
-                  </div>
-                  <div style={{
-                    fontSize: 20, fontWeight: 700,
-                    color: selFlow.net >= 0 ? A.income : A.billPast,
-                  }}>
-                    {selFlow.net >= 0 ? '+' : ''}{money(selFlow.net)}
-                  </div>
-                  <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 5, display: 'flex', gap: 14 }}>
-                    <span>↑ {money(selFlow.in)}</span>
-                    <span>↓ {money(selFlow.out)}</span>
-                  </div>
+          {/* ── Bottom zone: always-visible Upcoming agenda ── */}
+          <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+            <SectionHead>Upcoming</SectionHead>
+            <div style={{ flex: 1, overflowY: 'auto', marginTop: 4 }}>
+              {agenda.length === 0 && (
+                <div style={{ fontSize: 12, color: 'var(--text-tertiary)', padding: '12px 0' }}>
+                  Nothing in the projection window.
                 </div>
               )}
-            </>
-          )}
+              {agenda.map((it, i) => {
+                const showDate = i === 0 || agenda[i - 1].date !== it.date
+                const dObj = new Date(it.date + 'T12:00:00')
+                return (
+                  <div key={i} style={{
+                    display: 'flex', gap: 8, alignItems: 'baseline',
+                    padding: '5px 0', borderBottom: '1px solid var(--border)',
+                  }}>
+                    <div style={{
+                      width: 40, flexShrink: 0, fontSize: 11, textAlign: 'right',
+                      color: 'var(--text-tertiary)', visibility: showDate ? 'visible' : 'hidden',
+                    }}>
+                      {dObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                    </div>
+                    <div style={{
+                      flex: 1, minWidth: 0, fontSize: 12.5,
+                      borderLeft: `3px solid ${agendaColor(it.kind)}`, paddingLeft: 8,
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      color: 'var(--text-primary)',
+                    }}>
+                      {it.label}
+                    </div>
+                    <div style={{ flexShrink: 0, textAlign: 'right' }}>
+                      {it.amount != null && (
+                        <div style={{
+                          fontSize: 12.5, fontWeight: 600, fontVariantNumeric: 'tabular-nums',
+                          color: it.kind === 'income' ? A.income : it.amount < 0 ? A.billPast : 'var(--text-secondary)',
+                        }}>
+                          {it.amount > 0 ? '+' : ''}{money(it.amount)}
+                        </div>
+                      )}
+                      {it.balance != null && (
+                        <div style={{
+                          fontSize: 11, fontVariantNumeric: 'tabular-nums',
+                          color: it.balance < threshold ? A.billPast : 'var(--text-tertiary)',
+                        }}>
+                          {money(it.balance)}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
         </div>
       </div>
     </div>

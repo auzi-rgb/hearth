@@ -1880,9 +1880,11 @@ async def calendar_data(month: str = None):
     suggested_transfer = None
     if month >= cur_month:
         _conn2 = get_db()
-        sim_timeline = cash_flow_projection(_conn2, end)
+        # Always project at least 45 days out so the sidebar "Upcoming" agenda
+        # has a full horizon even when the viewed month has only a few days left.
+        sim_timeline = cash_flow_projection(_conn2, max(end, _today + timedelta(days=45)))
         _conn2.close()
-        _in_month = [e for e in sim_timeline if e["date"] >= start.isoformat()]
+        _in_month = [e for e in sim_timeline if start.isoformat() <= e["date"] <= end.isoformat()]
         if _in_month:
             _low = min(_in_month, key=lambda e: e["balance"])
             low_point = {"date": _low["date"], "balance": _low["balance"], "label": _low["label"]}
