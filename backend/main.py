@@ -3075,6 +3075,82 @@ async def bill_creep():
     drifting.sort(key=lambda x: -x["delta"])
     return {"annual": annual, "annual_total": round(sum(a["annual"] for a in annual), 2), "drifting": drifting}
 
+@router.get("/api/bills/reconcile")
+async def bills_reconcile(month: str = None):
+    """Two-way reconciliation for the Bills account:
+    - `bills`: each active bill's paid status this month, proven by a matching
+      transaction (with the ACTUAL amount + drift vs the forecast), not a guess.
+    - `untied`: Bills-account payments this month tied to NO bill (the flip side —
+      nothing should float; these are unset-up bills or mis-named matches).
+    Transfers and pending rows are excluded. Matching uses the same term as the
+    rest of the app (merchant_pattern, else name prefix)."""
+    conn = get_db()
+    month = month or date.today().strftime("%Y-%m")
+    bills_acct = find_role_account(conn, "bills", "bills")
+    if not bills_acct:
+        conn.close()
+        return {"month": month, "bills": [], "untied": [], "tied_count": 0, "untied_count": 0}
+    active = conn.execute("SELECT * FROM bills WHERE is_active=1").fetchall()
+    outs = conn.execute(
+        """SELECT id, transaction_date, amount, description FROM transactions
+           WHERE account_id=? AND amount < 0 AND strftime('%Y-%m', transaction_date)=?
+             AND (is_transfer IS NULL OR is_transfer=0) AND (is_pending IS NULL OR is_pending=0)
+           ORDER BY transaction_date""",
+        (bills_acct["id"], month)
+    ).fetchall()
+
+    def matches(b, desc):
+        term = _bill_match_term(b).lower().strip()
+        return len(term) >= 3 and term in desc
+
+    bills_out = []
+    tied_txn_ids = set()
+    for b in active:
+        ms = [tx for tx in outs if matches(b, (tx["description"] or "").lower())]
+        expected = float(b["expected_amount"] or 0)
+        if ms:
+            tied_txn_ids.update(tx["id"] for tx in ms)
+            latest = ms[-1]  # rows are date-ordered ascending
+            actual = abs(float(latest["amount"]))
+            bills_out.append({
+                "id": b["id"], "name": b["display_name"] or b["name"],
+                "expected": fmt_money(expected), "paid": True, "actual": fmt_money(actual),
+                "paid_date": latest["transaction_date"], "txn_id": latest["id"],
+                "count": len(ms),
+                "drift": fmt_money(actual - expected) if abs(actual - expected) >= 0.01 else None,
+            })
+        else:
+            bills_out.append({
+                "id": b["id"], "name": b["display_name"] or b["name"],
+                "expected": fmt_money(expected), "paid": False, "actual": None,
+                "paid_date": None, "txn_id": None, "count": 0, "drift": None,
+            })
+    untied = [
+        {"id": tx["id"], "date": tx["transaction_date"],
+         "amount": fmt_money(abs(float(tx["amount"]))), "description": tx["description"]}
+        for tx in outs if tx["id"] not in tied_txn_ids
+    ]
+    conn.close()
+    bills_out.sort(key=lambda x: (x["paid"], -x["expected"]))  # unpaid first, then by size
+    return {"month": month, "bills": bills_out, "untied": untied,
+            "tied_count": len(tied_txn_ids), "untied_count": len(untied)}
+
+@router.put("/api/transactions/{txn_id}/transfer")
+async def set_transaction_transfer(txn_id: int, request: Request):
+    """Flag/unflag a transaction as an internal transfer, so it drops out of
+    spending and out of the reconciliation's untied list."""
+    body = await request.json()
+    is_transfer = 1 if body.get("is_transfer", True) else 0
+    conn = get_db()
+    row = conn.execute("SELECT id FROM transactions WHERE id=?", (txn_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    conn.execute("UPDATE transactions SET is_transfer=? WHERE id=?", (is_transfer, txn_id))
+    conn.commit()
+    conn.close()
+    return {"id": txn_id, "is_transfer": is_transfer}
+
 # ── Month in Review ───────────────────────────────────────────────────────────
 
 def compute_month_review(conn, month: str) -> dict:

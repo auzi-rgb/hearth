@@ -628,6 +628,22 @@ export default function Spending({ active }) {
 
   const budgetMap = Object.fromEntries(budgets.map(b => [b.category, b.monthly_limit]))
 
+  // Which active bill (if any) each visible transaction is tied to — matched the
+  // same way the backend does (merchant_pattern, else the name prefix), so the
+  // list can show "this charge is tracked as the X bill" inline.
+  const txnBill = useMemo(() => {
+    const active = allBills.filter(b => b.is_active !== 0)
+    const term = b => (b.merchant_pattern || (b.name || '').slice(0, 8)).toLowerCase().trim()
+    const map = {}
+    for (const t of txns) {
+      const desc = (t.description || '').toLowerCase()
+      if (!desc) continue
+      const b = active.find(b => { const tm = term(b); return tm.length >= 3 && desc.includes(tm) })
+      if (b) map[t.id] = b
+    }
+    return map
+  }, [txns, allBills])
+
   // Donut items: drill mode → merchant palette; month selected → filtered by_category; else → all by_category
   const donutItems = useMemo(() => {
     if (drill) {
@@ -1188,18 +1204,36 @@ export default function Spending({ active }) {
                           flexShrink: 0,
                         }}>?</span>
                     )}
-                    <button
-                      onClick={() => { setBillLinkTxn(billLinkTxn?.id === t.id ? null : t); setDropdown(null) }}
-                      title="This is a recurring bill — link it to a bill line item (or create one) so it's tracked as an obligation, not living spend"
-                      style={{
-                        padding: '1px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600,
-                        background: billLinkTxn?.id === t.id ? '#3B82F6' : 'none',
-                        border: '1px dashed ' + (billLinkTxn?.id === t.id ? '#3B82F6' : 'var(--border)'),
-                        cursor: 'pointer', fontFamily: 'inherit',
-                        color: billLinkTxn?.id === t.id ? '#fff' : 'var(--text-tertiary)',
-                      }}>
-                      + bill
-                    </button>
+                    {txnBill[t.id] ? (
+                      <button
+                        onClick={() => { setBillLinkTxn(billLinkTxn?.id === t.id ? null : t); setDropdown(null) }}
+                        title={`Tracked as the "${txnBill[t.id].display_name || txnBill[t.id].name}" bill — click to change or unlink`}
+                        style={{
+                          padding: '1px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600,
+                          background: billLinkTxn?.id === t.id ? '#3B82F6' : 'rgba(59,130,246,0.1)',
+                          border: '1px solid #3B82F6', cursor: 'pointer', fontFamily: 'inherit',
+                          color: billLinkTxn?.id === t.id ? '#fff' : '#3B82F6',
+                          display: 'inline-flex', alignItems: 'center', gap: 3, maxWidth: 160,
+                        }}>
+                        <span style={{ flexShrink: 0 }}>📄</span>
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {txnBill[t.id].display_name || txnBill[t.id].name}
+                        </span>
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => { setBillLinkTxn(billLinkTxn?.id === t.id ? null : t); setDropdown(null) }}
+                        title="This is a recurring bill — link it to a bill line item (or create one) so it's tracked as an obligation, not living spend"
+                        style={{
+                          padding: '1px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600,
+                          background: billLinkTxn?.id === t.id ? '#3B82F6' : 'none',
+                          border: '1px dashed ' + (billLinkTxn?.id === t.id ? '#3B82F6' : 'var(--border)'),
+                          cursor: 'pointer', fontFamily: 'inherit',
+                          color: billLinkTxn?.id === t.id ? '#fff' : 'var(--text-tertiary)',
+                        }}>
+                        + bill
+                      </button>
+                    )}
                   </div>
                 </div>
                 <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--red)', marginLeft: 12 }}>

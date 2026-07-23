@@ -339,14 +339,35 @@ export default function Bills({ active }) {
   const [creep, setCreep] = useState(null)
   const [showAnnual, setShowAnnual] = useState(false)
   const [squeeze, setSqueeze] = useState(null)
+  const [reconcile, setReconcile] = useState(null)
+  const [reconBusy, setReconBusy] = useState(null)  // txn id currently being acted on
 
   const load = useCallback(() => {
     fetch(`${API}/bills`).then(r => r.json()).then(setBills).catch(() => {})
     fetch(`${API}/bills/creep`).then(r => r.json()).then(setCreep).catch(() => {})
+    fetch(`${API}/bills/reconcile`).then(r => r.json()).then(setReconcile).catch(() => {})
     fetch(`${API}/dashboard`).then(r => r.json())
       .then(d => setSqueeze({ left: d.left_to_live, living: d.actual_living_median, gap: d.living_squeeze }))
       .catch(() => {})
   }, [])
+
+  // Reconciliation actions on an unaccounted Bills-account payment.
+  async function linkUntied(txnId, billId) {
+    setReconBusy(txnId)
+    await fetch(`${API}/bills/link-transaction`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(billId ? { transaction_id: txnId, bill_id: billId } : { transaction_id: txnId }),
+    }).catch(() => {})
+    setReconBusy(null); load()
+  }
+  async function markUntiedTransfer(txnId) {
+    setReconBusy(txnId)
+    await fetch(`${API}/transactions/${txnId}/transfer`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_transfer: true }),
+    }).catch(() => {})
+    setReconBusy(null); load()
+  }
 
   useEffect(() => {
     if (active) {
@@ -376,6 +397,8 @@ export default function Bills({ active }) {
 
   const sorted = [...bills].sort((a, b) => (a.day_of_month ?? 32) - (b.day_of_month ?? 32))
   const total  = bills.reduce((sum, b) => sum + (b.monthly_equivalent ?? b.expected_amount ?? 0), 0)
+  // Per-bill reconciliation (tied to a real transaction this month) by bill id.
+  const recBill = Object.fromEntries((reconcile?.bills || []).map(b => [b.id, b]))
 
   const byType = bills.reduce((acc, b) => {
     const t = b.payment_type || 'Recurring'
@@ -509,6 +532,41 @@ export default function Bills({ active }) {
         </div>
       )}
 
+      {/* Unaccounted payments — every Bills-account payment should tie to a bill
+          or be a transfer; these don't yet, so surface them as action items. */}
+      {reconcile && reconcile.untied.length > 0 && (
+        <div className="apple-card" style={{ padding: '18px 24px', marginBottom: 16, border: '1px solid rgba(255,149,0,0.4)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 15 }}>⚠️</span>
+            <span style={{ fontSize: 15, fontWeight: 700 }}>
+              {reconcile.untied.length} unaccounted payment{reconcile.untied.length !== 1 ? 's' : ''} this month
+            </span>
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '4px 0 12px' }}>
+            Every payment from your Bills account should be tied to a bill or marked a transfer. Link these so nothing hides — and if a known bill shows here, its merchant name changed.
+          </div>
+          {reconcile.untied.map(u => (
+            <div key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+              padding: '9px 0', borderTop: '1px solid var(--border)', opacity: reconBusy === u.id ? 0.5 : 1 }}>
+              <div style={{ flex: 1, minWidth: 190 }}>
+                <div style={{ fontSize: 13, fontWeight: 500 }}>{u.description || '—'}</div>
+                <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{u.date} · {money(u.amount)}</div>
+              </div>
+              <select disabled={reconBusy === u.id} defaultValue=""
+                onChange={e => { if (e.target.value) linkUntied(u.id, Number(e.target.value)) }}
+                className="apple-select" style={{ fontSize: 12, maxWidth: 190 }}>
+                <option value="">Link to bill…</option>
+                {sorted.map(b => <option key={b.id} value={b.id}>{b.display_name || b.name}</option>)}
+              </select>
+              <button disabled={reconBusy === u.id} onClick={() => linkUntied(u.id, null)}
+                className="apple-btn-secondary" style={{ fontSize: 12 }}>+ New bill</button>
+              <button disabled={reconBusy === u.id} onClick={() => markUntiedTransfer(u.id)}
+                className="apple-btn-secondary" style={{ fontSize: 12 }} title="Internal transfer — not a bill">↔ Transfer</button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Table — horizontal scroll on narrow screens so the 9 fixed columns
           (incl. Edit/Delete on the right) are never clipped off-screen on mobile */}
       <div className="apple-card" style={{ padding: '8px 16px', overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
@@ -565,11 +623,22 @@ export default function Bills({ active }) {
                   padding: '11px 4px', alignItems: 'center', borderBottom: '1px solid var(--border)',
                   opacity: bill.paid_this_month ? 0.55 : 1 }}>
 
-                  {/* Paid indicator */}
+                  {/* Paid indicator — ✓ when a real transaction ties to this bill
+                      this month (tooltip shows the actual amount + any drift vs the
+                      forecast); ✓* means the amount differed. Falls back to a
+                      manual paid mark when there's no matched transaction. */}
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                    {bill.paid_this_month && (
+                    {recBill[bill.id]?.paid ? (
+                      <span title={`Paid ${money(recBill[bill.id].actual)} on ${recBill[bill.id].paid_date}`
+                        + (recBill[bill.id].drift ? ` · ${recBill[bill.id].drift > 0 ? '+' : '−'}${money(Math.abs(recBill[bill.id].drift))} vs forecast` : '')
+                        + (recBill[bill.id].count > 1 ? ` · ${recBill[bill.id].count} payments` : '')}
+                        style={{ fontSize: 13, fontWeight: 700, cursor: 'help',
+                          color: recBill[bill.id].drift ? 'var(--orange)' : 'var(--accent-text)' }}>
+                        ✓{recBill[bill.id].drift ? '*' : ''}
+                      </span>
+                    ) : bill.paid_this_month ? (
                       <span style={{ fontSize: 13, color: 'var(--accent-text)', fontWeight: 700 }}>✓</span>
-                    )}
+                    ) : null}
                   </div>
 
                   {/* Day */}
