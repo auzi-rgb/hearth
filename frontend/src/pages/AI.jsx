@@ -14,6 +14,50 @@ const PERSONA_PRESETS = {
 
 const LS_CTX_KEY = 'hearth_ai_context_sections'
 const LS_SAVED_PROMPTS = 'hearth_ai_saved_prompts'
+const LS_BUDGET_PREFIX = 'hearth_budget_limit_'
+
+// ── Feature 3: native tool-calling ────────────────────────────────────────────
+// Real Ollama function-calling replaces the old ```action``` text convention.
+// The model returns structured tool_calls, which we surface as confirm cards
+// (writes always stay human-in-the-loop). The text-action parser is kept as a
+// fallback for models that don't support tools.
+const TOOLS = [
+  { type: 'function', function: {
+    name: 'create_bill',
+    description: 'Create a recurring monthly bill. Only call when the user explicitly asks to add or create a bill.',
+    parameters: { type: 'object', properties: {
+      name: { type: 'string' },
+      amount: { type: 'number', description: 'Monthly amount in dollars' },
+      due_day: { type: 'integer', description: 'Day of the month it is due, 1-31' },
+      category: { type: 'string' },
+    }, required: ['name', 'amount', 'due_day'] },
+  } },
+  { type: 'function', function: {
+    name: 'set_budget_limit',
+    description: 'Set the monthly budget limit for a spending category. Only call when the user explicitly asks to set or change a budget.',
+    parameters: { type: 'object', properties: {
+      category: { type: 'string' },
+      limit: { type: 'number', description: 'Monthly limit in dollars' },
+    }, required: ['category', 'limit'] },
+  } },
+]
+
+// Models that call tools reliably WITHOUT over-triggering on normal questions.
+// llama3.1:8b is deliberately excluded — in testing it fabricated tool calls for
+// plain informational questions (returning empty text), which breaks ordinary
+// chat. Attach tools only for allow-listed models; others fall back to text.
+const TOOL_MODELS = ['qwen2.5']
+function modelSupportsTools(m) { return TOOL_MODELS.some(t => (m || '').includes(t)) }
+
+// Ollama returns tool_call arguments as either an object or a JSON string.
+let _actionSeq = 0
+function toolCallToAction(tc) {
+  let args = tc?.function?.arguments
+  if (typeof args === 'string') { try { args = JSON.parse(args) } catch { args = {} } }
+  // Stable id so ActionCards keep their own React identity — keying by array
+  // index let a dismissed card's internal state bleed onto a surviving sibling.
+  return { _id: tc?.id || `act-${_actionSeq++}`, action: tc?.function?.name, ...(args || {}) }
+}
 
 const DEFAULT_PROMPTS = [
   'How much have I spent on food this month compared to last month?',
@@ -105,7 +149,9 @@ function ActionCard({ action, onConfirm, onDismiss }) {
   }
 
   const label = action.action === 'create_bill'
-    ? `Add bill: ${action.name} · $${action.amount}/mo · due the ${action.due_day}${['th','st','nd','rd'][Math.min(action.due_day % 10, 3) * (action.due_day < 4 || action.due_day > 20 ? 1 : 0)] || 'th'}`
+    ? `Add bill: ${action.name} · $${action.amount}/mo · due day ${action.due_day}`
+    : action.action === 'set_budget_limit'
+    ? `Set ${action.category} budget to $${action.limit}/mo`
     : JSON.stringify(action)
 
   return (
@@ -439,7 +485,7 @@ export default function AI({ active }) {
   const [showMemory, setShowMemory] = useState(false)
   const [streamingText, setStreamingText] = useState('')
   const [sessionStartedAt] = useState(new Date().toISOString())
-  const [pendingAction, setPendingAction] = useState(null)
+  const [pendingActions, setPendingActions] = useState([])
   const [summaryCard, setSummaryCard] = useState(null)
   const [scanCard, setScanCard] = useState(null) // null=hidden, []/'loaded'=show
   const [budgetSuggestions, setBudgetSuggestions] = useState(null)
@@ -460,11 +506,11 @@ export default function AI({ active }) {
   // ── On activate: load settings + maybe auto-run ───────────────────────────
   useEffect(() => {
     if (!active) return
+    // Populate the dropdown ONLY — do not touch the selected model here. The
+    // saved setting (below) is authoritative; setting it from the model list
+    // used to race the settings fetch and clobber the saved model back to nemo.
     fetch(`${GATEWAY}/models`).then(r => r.json()).then(d => {
-      const list = d.models || []
-      setModels(list)
-      const nemo = list.find(m => m.name.includes('mistral-nemo') || m.name.includes('mistral'))
-      if (nemo) setModel(nemo.name)
+      setModels(d.models || [])
     }).catch(() => {})
 
     fetch(`${API}/settings`).then(r => r.json()).then(d => {
@@ -480,6 +526,15 @@ export default function AI({ active }) {
       }
     }).catch(() => {})
   }, [active]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Persist a setting so changes made from the Assistant's ⚙ panel stick across
+  // reloads — same backend keys the Settings page uses (single source of truth).
+  const saveSetting = useCallback((key, value) => {
+    fetch(`${API}/settings/${key}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: String(value) }),
+    }).catch(() => {})
+  }, [])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -617,31 +672,61 @@ ${conversationText}`
 
     abortRef.current = new AbortController()
     let full = ''
+    const toolCalls = []
 
     try {
+      const reqBody = { model, messages: apiMessages, stream: true, options: { temperature } }
+      if (modelSupportsTools(model)) reqBody.tools = TOOLS
+
       const r = await fetch(`${API}/ai/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, messages: apiMessages, stream: true, options: { temperature } }),
+        body: JSON.stringify(reqBody),
         signal: abortRef.current.signal,
       })
 
+      // Surface backend/gateway errors instead of silently rendering an empty
+      // bubble (a 429 rate-limit, 502, etc. would otherwise look like "nothing").
+      if (!r.ok) {
+        let detail = `HTTP ${r.status}`
+        try { detail = (await r.json()).detail || detail } catch {}
+        throw new Error(detail)
+      }
+
       const reader = r.body.getReader()
       const decoder = new TextDecoder()
+      let buffer = ''
+      const consume = (line) => {
+        if (!line.trim()) return
+        let obj
+        try { obj = JSON.parse(line) } catch { return }
+        full += obj.message?.content || ''
+        if (obj.message?.tool_calls) toolCalls.push(...obj.message.tool_calls)
+        setStreamingText(full)
+      }
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
-        for (const line of decoder.decode(value).split('\n')) {
-          if (!line.trim()) continue
-          try { full += JSON.parse(line).message?.content || '' } catch {}
-          setStreamingText(full)
-        }
+        // Buffer across reads: NDJSON lines routinely split across network
+        // chunks, and a half-parsed line (especially a tool_call) must not be
+        // dropped. Keep the trailing partial line for the next iteration.
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop()
+        for (const line of lines) consume(line)
       }
+      if (buffer) consume(buffer)
 
-      const action = parseActionBlock(full)
-      if (action) setPendingAction(action)
+      // Native tool calls take priority; fall back to the text action block.
+      const actions = toolCalls.length
+        ? toolCalls.map(toolCallToAction)
+        : (() => { const a = parseActionBlock(full); return a ? [{ _id: `act-${_actionSeq++}`, ...a }] : [] })()
+      if (actions.length) setPendingActions(actions)
 
-      const assistantMsg = { role: 'assistant', content: full }
+      const assistantMsg = {
+        role: 'assistant',
+        content: full || (actions.length ? "Here's what I'll do — confirm below." : ''),
+      }
       setMessages(prev => [...prev, assistantMsg])
     } catch (e) {
       if (e.name !== 'AbortError') {
@@ -661,27 +746,32 @@ ${conversationText}`
     setStreamingText('')
     setSending(false)
     sendingRef.current = false
-    setPendingAction(null)
+    setPendingActions([])
     setSummaryCard(null)
     setScanCard(null)
   }
 
-  // ── Confirm create-bill action ────────────────────────────────────────────
+  // ── Confirm a tool/action (writes stay human-in-the-loop) ──────────────────
   async function confirmAction(action) {
-    if (action.action !== 'create_bill') return
-    await fetch(`${API}/bills`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: action.name,
-        expected_amount: action.amount,
-        day_of_month: action.due_day,
-        category: action.category || 'other',
-        confidence: 'fixed',
-        is_active: 1,
-      }),
-    })
-    setPendingAction(null)
+    if (action.action === 'create_bill') {
+      await fetch(`${API}/bills`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: action.name,
+          expected_amount: action.amount,
+          day_of_month: action.due_day,
+          category: action.category || 'other',
+          confidence: 'fixed',
+          is_active: 1,
+        }),
+      })
+    } else if (action.action === 'set_budget_limit') {
+      const cat = String(action.category || '').toLowerCase().trim()
+      if (cat && action.limit != null) {
+        localStorage.setItem(LS_BUDGET_PREFIX + cat, String(action.limit))
+      }
+    }
   }
 
   // ── Month-end summary ─────────────────────────────────────────────────────
@@ -789,10 +879,18 @@ Transactions: ${JSON.stringify(context.recent_transactions || [], null, 2)}`
       {/* Inline settings panel */}
       {showSettings && (
         <div className="apple-card" style={{ padding: '16px 20px', marginBottom: 12, flexShrink: 0 }}>
+          <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 12 }}>
+            Changes save automatically and sync with the Settings page.
+            {modelSupportsTools(model)
+              ? ' · Actions enabled — try “set my food budget to 650”.'
+              : ' · Select a qwen2.5 model to enable natural-language actions.'}
+          </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
             <div>
               <div className="apple-label" style={{ marginBottom: 6 }}>Model</div>
-              <select className="apple-select" value={model} onChange={e => setModel(e.target.value)} style={{ width: '100%' }}>
+              <select className="apple-select" value={model}
+                onChange={e => { setModel(e.target.value); saveSetting('ai_default_model', e.target.value) }}
+                style={{ width: '100%' }}>
                 {models.length === 0 && <option value={model}>{model}</option>}
                 {models.map(m => <option key={m.name} value={m.name}>{m.name}</option>)}
               </select>
@@ -801,6 +899,8 @@ Transactions: ${JSON.stringify(context.recent_transactions || [], null, 2)}`
               <div className="apple-label" style={{ marginBottom: 6 }}>Temperature: {temperature}</div>
               <input type="range" min={0} max={1} step={0.05} value={temperature}
                 onChange={e => setTemperature(parseFloat(e.target.value))}
+                onMouseUp={e => saveSetting('ai_temperature', e.target.value)}
+                onTouchEnd={e => saveSetting('ai_temperature', e.target.value)}
                 style={{ width: '100%', accentColor: 'var(--accent)', marginTop: 8 }} />
             </div>
             <div style={{ gridColumn: 'span 2' }}>
@@ -808,7 +908,7 @@ Transactions: ${JSON.stringify(context.recent_transactions || [], null, 2)}`
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 {Object.entries(PERSONA_PRESETS).map(([key, val]) => (
                   <button key={key} className="apple-btn-secondary"
-                    onClick={() => setSystemPrompt(val)}
+                    onClick={() => { setSystemPrompt(val); saveSetting('ai_system_prompt', val) }}
                     style={{ fontSize: 12, textTransform: 'capitalize', background: systemPrompt === val ? 'var(--accent)' : undefined, color: systemPrompt === val ? '#fff' : undefined }}>
                     {key}
                   </button>
@@ -817,7 +917,9 @@ Transactions: ${JSON.stringify(context.recent_transactions || [], null, 2)}`
             </div>
             <div style={{ gridColumn: 'span 2' }}>
               <div className="apple-label" style={{ marginBottom: 6 }}>System prompt</div>
-              <textarea className="apple-input" value={systemPrompt} onChange={e => setSystemPrompt(e.target.value)}
+              <textarea className="apple-input" value={systemPrompt}
+                onChange={e => setSystemPrompt(e.target.value)}
+                onBlur={e => saveSetting('ai_system_prompt', e.target.value)}
                 rows={3} style={{ resize: 'vertical', fontFamily: 'inherit', fontSize: 13 }} />
             </div>
           </div>
@@ -870,9 +972,10 @@ Transactions: ${JSON.stringify(context.recent_transactions || [], null, 2)}`
         {messages.map((m, i) => (
           <div key={i}>
             <Bubble role={m.role} content={m.content} />
-            {m.role === 'assistant' && pendingAction && i === messages.length - 1 && (
-              <ActionCard action={pendingAction} onConfirm={confirmAction} onDismiss={() => setPendingAction(null)} />
-            )}
+            {m.role === 'assistant' && i === messages.length - 1 && pendingActions.map((a) => (
+              <ActionCard key={a._id} action={a} onConfirm={confirmAction}
+                onDismiss={() => setPendingActions(prev => prev.filter(x => x._id !== a._id))} />
+            ))}
           </div>
         ))}
         {sending && streamingText && <Bubble role="assistant" content={streamingText} streaming />}

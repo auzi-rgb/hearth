@@ -692,7 +692,13 @@ export default function Budget({ active, onAlert, navigateTo }) {
       clearInterval(pollRef.current)
     }
     return () => clearInterval(pollRef.current)
-  }, [active, loadCategories, loadBills, loadSpent, loadIncome, loadHistory])
+    // Depend only on `active`. The loaders are useCallbacks whose identities
+    // change when the state they set (income, categories) updates — and this
+    // effect sets exactly that state, so listing them here retriggers the effect
+    // in an infinite loop, spamming /budgets, /dashboard, /spending/summary until
+    // Chrome exhausts its socket pool (ERR_INSUFFICIENT_RESOURCES) and every other
+    // fetch — including the AI chat — fails with "network error".
+  }, [active]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Actions ──────────────────────────────────────────────────────────────────
 

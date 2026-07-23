@@ -294,14 +294,29 @@ export default function Dashboard({ active, navigateTo }) {
   const pace            = data.food_daily_pace
   const overPace        = allowance != null && pace != null && pace > allowance
   const safeBuffer      = data.safe_spend_buffer        ?? 200
+  const needForBills    = data.bills_until_next_paycheck ?? 0
+  const needByDate      = data.bills_until_next_paycheck_date
+    ? new Date(data.bills_until_next_paycheck_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+    : null
+  const incomingPay     = data.incoming_next_paycheck
+  const billsCovered    = billsBal >= needForBills
 
+  // Next paycheck = the next one still COMING (from the cash-flow projection),
+  // not today's already-deposited one. Using the projection's next-paycheck date
+  // keeps this label consistent with the "Needed for bills until next paycheck"
+  // card instead of showing "today" for a paycheck that already landed.
   let paycheckLabel = null
-  if (data.next_paycheck_date) {
-    const d = new Date(data.next_paycheck_date + 'T12:00:00')
+  if (data.bills_until_next_paycheck_date) {
+    // Anchor both dates at local midnight so the day-count is exact — parsing d at
+    // noon while t is midnight added a half day and made Math.round overcount by 1
+    // (tomorrow showed as "2 days"). The T00:00:00 keeps it local (a bare date
+    // string would parse as UTC and could slip a day in a negative offset).
+    const d = new Date(data.bills_until_next_paycheck_date + 'T00:00:00')
+    const t = new Date(); t.setHours(0, 0, 0, 0)
     const dayName = d.toLocaleDateString('en-US', { weekday: 'long' })
     const dateStr  = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-    const days = data.days_until_paycheck
-    const daysStr = days === 0 ? 'today' : days === 1 ? 'tomorrow' : `${days} days`
+    const days = Math.round((d - t) / 86400000)
+    const daysStr = days <= 0 ? 'soon' : days === 1 ? 'tomorrow' : `${days} days`
     paycheckLabel = `${dayName} ${dateStr}  (${daysStr})`
   }
 
@@ -521,13 +536,34 @@ export default function Dashboard({ active, navigateTo }) {
         <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0',
           borderTop: '1px solid var(--border)', borderBottom: '2px solid var(--border)', fontSize: 14,
           marginBottom: 14 }}>
-          <span style={{ color: 'var(--text-secondary)' }} title="This month's actual cash: real income minus every obligation. Not the plan's surplus-to-debt (that's baseline income minus your committed budget, shown in the Plan strip).">
-            Cash beyond bills <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>(this month)</span>
+          <span style={{ color: 'var(--text-secondary)' }} title="A normal month's income (baseline) minus monthly bills — the sustainable surplus. This month's actual income is higher because a paycheck arrived early, and that extra is reserved for next month's first bills, so it isn't counted here. For what's actually movable today, use 'Safe to move now'.">
+            Typical cash beyond bills <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>(normal month)</span>
           </span>
           <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums',
             color: monthlySurplus >= 0 ? 'var(--accent-text)' : 'var(--red)' }}>
             {money(monthlySurplus)}
           </span>
+        </div>
+
+        {/* Needed to cover bills until the next paycheck lands — same day-by-day
+            simulation as Safe to move, so: balance = this + safe-to-move + buffer. */}
+        <div style={{ padding: '10px 12px', background: 'var(--bg-subtle)', borderRadius: 10, marginBottom: 12 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+            <span style={{ fontSize: 14, color: 'var(--text-secondary)' }}
+              title="Total of every bill due between today and — but not including — your next paycheck, from the day-by-day simulation (real bills + real paydays). Bills due on payday itself are covered by that day's deposit, so they aren't counted here.">
+              Needed for bills until next paycheck
+            </span>
+            <span style={{ fontSize: isMobile ? 22 : 24, fontWeight: 700, letterSpacing: '-0.03em',
+              fontVariantNumeric: 'tabular-nums', color: billsCovered ? 'var(--text-primary)' : 'var(--red)' }}>
+              {money(needForBills)}
+            </span>
+          </div>
+          <div style={{ fontSize: 11, color: billsCovered ? 'var(--text-tertiary)' : 'var(--red)', marginTop: 3 }}>
+            {needByDate ? `Due before your next paycheck on ${needByDate}` : 'No paycheck in the projection window'}
+            {billsCovered
+              ? (incomingPay != null ? ` · ${money(incomingPay)} lands then` : '')
+              : ' · exceeds your current balance'}
+          </div>
         </div>
 
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',

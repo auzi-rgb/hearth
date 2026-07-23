@@ -899,14 +899,47 @@ def cash_flow_projection(conn, end_date, start_balance=None) -> list:
                 if m > 12:
                     m = 1
                     y += 1
-    for member in get_household(conn):
-        info = detect_next_payday(conn, member["key"])
+    # To tell whether a paycheck dated today has ALREADY posted (and is thus in
+    # start_balance, so projecting it again would double-count), we look at today's
+    # real SETTLED deposits into the Bills account. We use the transactions table
+    # (current) rather than detect_next_payday's paychecks table, which can lag the
+    # bank by a sync cycle — the lag is what once dropped a not-yet-posted payday
+    # and made the forecast dive falsely negative. Pending deposits are excluded:
+    # they're not yet in the balance. Each deposit is matched to the earner whose
+    # expected paycheck is CLOSEST, so one earner's deposit can't suppress another
+    # earner's not-yet-arrived paycheck.
+    _bills_acct = find_role_account(conn, "bills", "bills")
+    _bills_acct_id = _bills_acct["id"] if _bills_acct else None
+    _member_infos = [(m, detect_next_payday(conn, m["key"])) for m in get_household(conn)]
+    _member_amounts = [i["expected_amount"] for _, i in _member_infos if i.get("expected_amount")]
+    _today_deposits = []
+    if _bills_acct_id:
+        _today_deposits = [float(r["amount"]) for r in conn.execute(
+            """SELECT amount FROM transactions
+               WHERE account_id=? AND transaction_date=? AND amount>0
+                 AND (is_transfer IS NULL OR is_transfer=0)
+                 AND (is_pending IS NULL OR is_pending=0)""",
+            (_bills_acct_id, today.isoformat())).fetchall()]
+
+    def _already_posted_today(amt):
+        for dep in _today_deposits:
+            if not (amt * 0.7 <= dep <= amt * 1.4):
+                continue
+            # Only claim this deposit for the member it best matches.
+            if min(_member_amounts, key=lambda a: abs(a - dep)) == amt:
+                return True
+        return False
+
+    for member, info in _member_infos:
         if info.get("next_date") and info.get("expected_amount"):
             d = date.fromisoformat(info["next_date"])
             amt = float(info["expected_amount"])
             label = member.get("label") or member["key"].capitalize()
             while d <= end_date:
-                if d >= today:
+                # Project every paycheck from today forward; for one dated TODAY,
+                # skip it only if its deposit has already settled today.
+                include = d > today or not _already_posted_today(amt)
+                if include:
                     events.append((d, amt, f"{label} paycheck", "income"))
                 d += timedelta(weeks=info.get("interval_weeks", 2))
     events.sort(key=lambda x: x[0])
@@ -1185,7 +1218,10 @@ async def ai_chat(request: Request):
     body.setdefault("stream", True)
     # Ensure enough context window for our financial payload
     body.setdefault("options", {})
-    body["options"].setdefault("num_ctx", 8192)
+    # Feature 5 — the wider financial context (up to 150 txns) needs more room than
+    # the old 8192. 16384 comfortably fits the payload on the 8B–14B local models
+    # (q8_0 KV cache keeps the VRAM cost modest). Callers can still override.
+    body["options"].setdefault("num_ctx", 16384)
     _timeout = httpx.Timeout(connect=30, read=600, write=30, pool=30)
     if body.get("stream"):
         async def streamer():
@@ -1229,18 +1265,31 @@ async def ai_gateway_test():
     model = get_setting(conn, "ai_default_model", "mistral-nemo:latest") or "mistral-nemo:latest"
     conn.close()
     try:
-        async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
+        # 30s was too tight: a cold model load (esp. slower/vision models like
+        # qwen3-vl) can take 20–30s just to warm up, tripping the timeout and
+        # surfacing as a misleading "502 Gateway unreachable". Give it room, and
+        # cap num_predict so a verbose model can't ramble past the deadline.
+        async with httpx.AsyncClient(verify=False, timeout=120.0) as client:
             r = await client.post(
                 f"{GATEWAY_URL}/chat",
                 json={
                     "model": model,
                     "messages": [{"role": "user", "content": "Reply with one short sentence confirming you are working."}],
                     "stream": False,
+                    "options": {"num_predict": 80, "temperature": 0},
                 },
                 headers={"X-App-Name": "home-finance"},
             )
             d = r.json()
-            content = d.get("message", {}).get("content", "") or d.get("response", "") or str(d)
+            msg = d.get("message", {}) if isinstance(d, dict) else {}
+            resp = d.get("response") if isinstance(d, dict) else ""
+            # Some models (qwen3-vl, deepseek-r1) emit reasoning in a `thinking`
+            # field and leave `content` empty — surface that as text instead of
+            # dumping the raw response dict.
+            content = (msg.get("content") or "").strip() or resp or ""
+            if not content:
+                thinking = (msg.get("thinking") or "").strip()
+                content = thinking or "Model responded but returned no text — it may be a vision/reasoning model that isn't ideal for chat."
             return {"response": content, "model": model}
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gateway unreachable: {e}")
@@ -1572,6 +1621,36 @@ async def dashboard():
     # current balance exceeds that reserve plus the buffer itself.
     reserve_needed = max(0.0, bills_balance - min_balance)
     safe_today = min_balance - safe_buffer
+
+    # "Amount needed to cover bills until next paycheck": sum bills due STRICTLY
+    # BEFORE the next paycheck lands. Bills due ON payday are covered by that day's
+    # deposit, so they're not "needed" from the current balance — counting them
+    # would overstate this and disagree with the Calendar. (Safe-to-move stays
+    # deliberately more conservative about same-day timing — that's a floor, this
+    # is an estimate of what you must carry to payday.)
+    next_paycheck_date = None
+    next_paycheck_amount = None
+    for _e in cash_flow_timeline:
+        if _e["kind"] == "income":
+            next_paycheck_date = _e["date"]
+            break
+    if next_paycheck_date:
+        bills_until_next_paycheck = round(sum(
+            abs(_e["amount"]) for _e in cash_flow_timeline
+            if _e["kind"] == "bill" and _e["date"] < next_paycheck_date), 2)
+        # Sum ALL paychecks landing that day (both earners can be paid the same
+        # date), so the "incoming" figure reflects the full deposit.
+        next_paycheck_amount = round(sum(
+            _e["amount"] for _e in cash_flow_timeline
+            if _e["kind"] == "income" and _e["date"] == next_paycheck_date), 2)
+    else:
+        # No paycheck projected in the window — you must carry EVERY upcoming bill
+        # with no income arriving, so this is the sum of them all, not $0 (which
+        # would be the most reassuring value for the worst case). The frontend
+        # shows "No paycheck in the projection window" alongside it.
+        bills_until_next_paycheck = round(sum(
+            abs(_e["amount"]) for _e in cash_flow_timeline if _e["kind"] == "bill"), 2)
+
     variances = conn.execute("SELECT * FROM paychecks ORDER BY actual_date DESC LIMIT 5").fetchall()
     # Monthly income vs expenses — last 4 months from Bills account
     monthly_history = []
@@ -1606,7 +1685,8 @@ async def dashboard():
     hardline_total = bills_recurring_total + debt_payments_total
     monthly_bills_total = hardline_total + contributions_total
 
-    monthly_surplus = monthly_income - monthly_bills_total
+    # monthly_surplus ("Cash beyond bills") is computed further down from BASELINE
+    # income, not this calendar month's actual — see the note there.
 
     # Safe to transfer NOW: safe_today already accounts for the lowest point the
     # Bills balance will hit over the simulation window, so this can't recommend
@@ -1673,6 +1753,14 @@ async def dashboard():
     # Baseline income — the planning number budgets are built on
     _baseline = compute_baseline_income(conn)
     income_vs_baseline = round(monthly_income - _baseline["baseline_income"], 2)
+
+    # "Cash beyond bills" uses BASELINE income, not this calendar month's actual.
+    # When a paycheck lands early (income_vs_baseline > 0) it belongs to next
+    # month's first bills — the cash-flow simulation already reserves it — so
+    # counting it as this-month surplus would double-spend it, the exact
+    # month-to-month error the app is built to avoid. Report the sustainable
+    # normal-month figure instead; "Safe to move now" covers what's movable today.
+    monthly_surplus = round(_baseline["baseline_income"] - monthly_bills_total, 2)
 
     # The squeeze guard: baseline − hardline − contributions = what the plan
     # leaves to live on. Compare against what the household ACTUALLY lives on
@@ -1772,6 +1860,9 @@ async def dashboard():
         "planned_transfers": planned,
         "monthly_surplus": fmt_money(monthly_surplus),
         "suggested_transfer": fmt_money(suggested_transfer),
+        "bills_until_next_paycheck": fmt_money(bills_until_next_paycheck),
+        "bills_until_next_paycheck_date": next_paycheck_date,
+        "incoming_next_paycheck": fmt_money(next_paycheck_amount) if next_paycheck_amount is not None else None,
         "baseline_income": _baseline["baseline_income"],
         "baseline_source": _baseline["baseline_source"],
         "income_vs_baseline": income_vs_baseline,
@@ -3550,17 +3641,22 @@ async def trigger_ai_briefing():
         raise HTTPException(status_code=502, detail=f"Briefing failed: {e}")
 
 @router.get("/api/ai/context")
-async def ai_context():
+async def ai_context(days: int = 90, txn_limit: int = 150):
+    # Feature 5 — wider context: default to 90 days / 150 transactions (was a hard
+    # 30) so the assistant can reason over month-over-month trends instead of a
+    # thin recent slice. Clamped so a bad query can't blow the model's context.
+    days = max(1, min(days, 365))
+    txn_limit = max(1, min(txn_limit, 500))
     conn = get_db()
     today = date.today()
-    since_90 = (today - timedelta(days=90)).isoformat()
+    since = (today - timedelta(days=days)).isoformat()
     accounts = conn.execute("SELECT * FROM accounts WHERE is_active=1").fetchall()
     balances = {a["name"]: get_account_balance(conn, a["id"]) for a in accounts}
     txns = conn.execute(
         """SELECT transaction_date, amount, description, category
            FROM transactions WHERE transaction_date >= ? AND is_transfer=0
-           ORDER BY transaction_date DESC LIMIT 30""",
-        (since_90,)
+           ORDER BY transaction_date DESC LIMIT ?""",
+        (since, txn_limit)
     ).fetchall()
     bills = conn.execute(
         "SELECT name, expected_amount, day_of_month, bill_type FROM bills WHERE is_active=1"

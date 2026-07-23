@@ -496,6 +496,12 @@ async def generate_coach_briefing() -> dict:
         ctx["plan_leaves_to_live_on"] = d.get("left_to_live")
         ctx["actual_monthly_living_cost"] = d.get("actual_living_median")
         ctx["living_squeeze"] = d.get("living_squeeze")
+        # The fixed outflows that make up plan_leaves_to_live_on — so the coach
+        # can diagnose what actually drives a squeeze instead of assuming it's
+        # contributions (which are often trivially small next to the gap).
+        ctx["monthly_debt_payments"] = d.get("debt_payments_total")
+        ctx["monthly_bills_recurring"] = d.get("bills_recurring_total")
+        ctx["monthly_contributions"] = d.get("contributions_total")
     except Exception:
         pass
 
@@ -517,7 +523,8 @@ Field meanings (be precise about these):
 - safe_to_transfer_today: from a day-by-day simulation that already reserves money for every upcoming bill in the next 60 days, INCLUDING bills early next month. When advising what is free to move, spend, or send at debt, use THIS number and only this number. Never reason from "income minus bills for the month" — a paycheck landing near month-end usually funds the next month's first bills, and calling it extra money is a mistake this household has explicitly asked you not to make.
 - baseline_monthly_income: what a NORMAL month brings in — the number their budget is built on. this_month_income_vs_baseline above zero means an extra-paycheck month; that extra is handled by the cash-flow simulation, not the budget, so do not suggest changing budget categories because of it.
 - true_surplus_above_typical_transfer: if present, this is genuinely free money — the simulation reserved everything first. This is the ONLY number you may ever call surplus.
-- living_squeeze: plan_leaves_to_live_on minus actual_monthly_living_cost. If NEGATIVE, the household's savings/investment contributions are over-committed: the shortfall will end up on credit cards, whose interest rate exceeds any savings yield. In that case your single most important advice is to reduce contributions until the squeeze clears — never suggest cutting food or essentials to protect a contribution.
+- living_squeeze: plan_leaves_to_live_on minus actual_monthly_living_cost. NEGATIVE means fixed obligations leave less room than the household typically spends on living, so the gap risks landing on credit cards. Do NOT reflexively blame savings/investment contributions. First DIAGNOSE the driver from the three components — monthly_debt_payments, monthly_bills_recurring, monthly_contributions: whichever is largest relative to baseline_monthly_income is what's actually squeezing the budget. Only suggest trimming contributions if monthly_contributions is large enough to meaningfully close the gap; when it is small next to the squeeze, say so plainly and point at the real driver (usually debt payments and recurring bills against income) instead. Also weigh whether the squeeze is even current: actual_monthly_living_cost is a 3-month median that a few one-off large purchases can inflate, so if discretionary_spent_month_to_date is pacing well below it, frame the squeeze as a trend to watch rather than an emergency. Never suggest cutting food or essentials to protect a contribution.
+- monthly_debt_payments / monthly_bills_recurring / monthly_contributions: the fixed monthly outflows subtracted from baseline_monthly_income to get plan_leaves_to_live_on. Use them to name what is actually driving a living_squeeze.
 
 Today's numbers:
 {json.dumps(ctx, indent=1)}"""
