@@ -504,7 +504,17 @@ export default function Spending({ active }) {
 
   // Drill-down state
   const [drill, setDrill] = useState(null)       // {cat, catColor, catTotal, merchants}
-  const [monthFilter, setMonthFilter] = useState(null)        // 'YYYY-MM' | null
+  const [monthFilter, setMonthFilter] = useState(null)        // 'YYYY-MM' | null (donut)
+  const [monthTxns, setMonthTxns] = useState(null)            // 'YYYY-MM' | null (transaction list)
+  // Current month + the two prior calendar months, for the transaction-list filter.
+  const MONTH_OPTIONS = useMemo(() => {
+    const now = new Date()
+    return [0, 1, 2].map(back => {
+      const dt = new Date(now.getFullYear(), now.getMonth() - back, 1)
+      const ym = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`
+      return { ym, label: back === 0 ? 'This month' : dt.toLocaleString('en-US', { month: 'short' }) }
+    })
+  }, [])
   const [selectedMerchant, setSelectedMerchant] = useState(null) // {key, display} | null
   const [loadingDrill, setLoadingDrill] = useState(false)
   const [hoveredIdx, setHoveredIdx] = useState(null)
@@ -551,22 +561,31 @@ export default function Spending({ active }) {
 
   const loadTxns = useCallback(async () => {
     if (!active) return
+    // A selected month widens the fetch far enough back to reach it; we then keep
+    // only that calendar month client-side. Search still applies within the month.
+    let fetchDays = isSearching ? searchRange : days
+    if (monthTxns) {
+      const [y, m] = monthTxns.split('-').map(Number)
+      const backDays = Math.ceil((Date.now() - new Date(y, m - 1, 1)) / 86400000) + 1
+      fetchDays = Math.max(fetchDays, backDays)
+    }
     const params = new URLSearchParams({
-      days: String(isSearching ? searchRange : days),
-      limit: isSearching ? '500' : '200',
+      days: String(fetchDays),
+      limit: (monthTxns || isSearching) ? '1000' : '200',
     })
     if (accountId) params.set('account_id', accountId)
     if (viewingUncategorized) {
       params.set('uncategorized', 'true')
     } else if (isSearching) {
       params.set('search', searchText.trim())
-    } else {
+    } else if (!monthTxns) {
       if (drill?.cat) params.set('category', drill.cat)
       if (selectedMerchant?.key) params.set('merchant_key', selectedMerchant.key)
     }
-    const t = await fetch(`${API}/spending/transactions?${params}`).then(r => r.json()).catch(() => [])
+    let t = await fetch(`${API}/spending/transactions?${params}`).then(r => r.json()).catch(() => [])
+    if (monthTxns) t = t.filter(x => (x.transaction_date || '').slice(0, 7) === monthTxns)
     setTxns(t)
-  }, [active, days, accountId, drill?.cat, selectedMerchant?.key, isSearching, searchRange, searchText, viewingUncategorized])
+  }, [active, days, accountId, drill?.cat, selectedMerchant?.key, isSearching, searchRange, searchText, viewingUncategorized, monthTxns])
 
   useEffect(() => {
     if (!active) return
@@ -594,8 +613,15 @@ export default function Spending({ active }) {
 
   // Reset drill when date range or account changes
   useEffect(() => {
-    setDrill(null); setMonthFilter(null); setSelectedMerchant(null); setViewingUncategorized(false)
+    setDrill(null); setMonthFilter(null); setSelectedMerchant(null); setViewingUncategorized(false); setMonthTxns(null)
   }, [days, accountId])
+
+  // Filter the transaction list to a calendar month (toggle off if re-clicked).
+  // A month view supersedes a category drill / uncategorized review.
+  function handleMonthTxnsClick(ym) {
+    setMonthTxns(prev => prev === ym ? null : ym)
+    setDrill(null); setSelectedMerchant(null); setViewingUncategorized(false)
+  }
 
   useEffect(() => { loadSummaryData() }, [loadSummaryData])
   useEffect(() => { loadTxns() }, [loadTxns])
@@ -644,9 +670,10 @@ export default function Spending({ active }) {
       // Uncategorized slice — each one needs individual review, not an aggregate
       // merchant breakdown, so jump straight to the filtered transaction list.
       setViewingUncategorized(true)
-      setDrill(null); setSelectedMerchant(null); setMonthFilter(null)
+      setDrill(null); setSelectedMerchant(null); setMonthFilter(null); setMonthTxns(null)
       return
     }
+    setMonthTxns(null)  // a category drill replaces any month-list filter
     setLoadingDrill(true)
     const qs = `category=${encodeURIComponent(item.rawCategory)}&days=${days}${accountId ? `&account_id=${accountId}` : ''}`
     const merchants = await fetch(`${API}/spending/merchants-by-category?${qs}`)
@@ -1040,6 +1067,18 @@ export default function Spending({ active }) {
           onChange={e => setSearchText(e.target.value)}
           style={{ flex: 1, minWidth: 200 }}
         />
+        {/* Jump the transaction list to a calendar month */}
+        <div style={{ display: 'flex', gap: 3, background: 'var(--bg-subtle)', borderRadius: 'var(--radius-pill)', padding: 3 }}>
+          {MONTH_OPTIONS.map(o => (
+            <button key={o.ym} onClick={() => handleMonthTxnsClick(o.ym)} title={`Show ${o.ym} transactions`} style={{
+              background: monthTxns === o.ym ? 'var(--bg-card)' : 'transparent', border: 'none',
+              cursor: 'pointer', padding: '5px 12px', borderRadius: 'var(--radius-pill)', fontSize: 12,
+              fontWeight: monthTxns === o.ym ? 600 : 400,
+              color: monthTxns === o.ym ? 'var(--text-primary)' : 'var(--text-secondary)',
+              fontFamily: 'inherit', boxShadow: monthTxns === o.ym ? 'var(--shadow-card)' : 'none', transition: 'all 0.15s',
+            }}>{o.label}</button>
+          ))}
+        </div>
         <div style={{ display: 'flex', gap: 3, background: 'var(--bg-subtle)', borderRadius: 'var(--radius-pill)', padding: 3, opacity: isSearching ? 1 : 0.5 }}>
           {SEARCH_RANGE_OPTIONS.map(o => (
             <button key={o.days} disabled={!isSearching} onClick={() => setSearchRange(o.days)} style={{
@@ -1073,6 +1112,15 @@ export default function Spending({ active }) {
             ) : drill && (
               <span style={{ fontWeight: 400, marginLeft: 6, textTransform: 'capitalize', color: 'var(--text-secondary)' }}>
                 · {selectedMerchant ? selectedMerchant.display : drill.cat}
+              </span>
+            )}
+            {monthTxns && (
+              <span style={{ fontWeight: 600, marginLeft: 6, color: 'var(--accent-text)' }}>
+                · {new Date(monthTxns + '-02').toLocaleString('en-US', { month: 'long', year: 'numeric' })}
+                <button onClick={() => setMonthTxns(null)} style={{
+                  marginLeft: 6, fontSize: 11, fontWeight: 400, background: 'none', border: 'none',
+                  cursor: 'pointer', color: 'var(--text-tertiary)', fontFamily: 'inherit',
+                }}>✕ clear</button>
               </span>
             )}
           </div>
