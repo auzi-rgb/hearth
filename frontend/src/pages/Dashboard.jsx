@@ -545,25 +545,31 @@ export default function Dashboard({ active, navigateTo }) {
           </span>
         </div>
 
-        {/* Needed to cover bills until the next paycheck lands — same day-by-day
-            simulation as Safe to move, so: balance = this + safe-to-move + buffer. */}
-        <div style={{ padding: '10px 12px', background: 'var(--bg-subtle)', borderRadius: 10, marginBottom: 12 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-            <span style={{ fontSize: 14, color: 'var(--text-secondary)' }}
-              title="Total of every bill due between today and — but not including — your next paycheck, from the day-by-day simulation (real bills + real paydays). Bills due on payday itself are covered by that day's deposit, so they aren't counted here.">
-              Needed for bills until next paycheck
-            </span>
-            <span style={{ fontSize: isMobile ? 22 : 24, fontWeight: 700, letterSpacing: '-0.03em',
-              fontVariantNumeric: 'tabular-nums', color: billsCovered ? 'var(--text-primary)' : 'var(--red)' }}>
-              {money(needForBills)}
-            </span>
+        {/* The math behind "Safe to move now", shown explicitly:
+            what's in Bills − bills due before the next paycheck − buffer.
+            All three come from the same day-by-day simulation. */}
+        <div style={{ padding: '12px 14px', background: 'var(--bg-subtle)', borderRadius: 10, marginBottom: 12 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.6,
+            color: 'var(--text-tertiary)', marginBottom: 8 }}>
+            How much is safe to move
           </div>
-          <div style={{ fontSize: 11, color: billsCovered ? 'var(--text-tertiary)' : 'var(--red)', marginTop: 3 }}>
-            {needByDate ? `Due before your next paycheck on ${needByDate}` : 'No paycheck in the projection window'}
-            {billsCovered
-              ? (incomingPay != null ? ` · ${money(incomingPay)} lands then` : '')
-              : ' · exceeds your current balance'}
-          </div>
+          {[
+            { label: "What's in Bills now", val: money(billsBal) },
+            { label: `− Bills due before next paycheck${needByDate ? ` (${needByDate})` : ''}`,
+              val: '−' + money(needForBills), red: !billsCovered },
+            { label: '− Safety buffer', val: '−' + money(safeBuffer) },
+          ].map((r, i) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '4px 0',
+              color: r.red ? 'var(--red)' : 'var(--text-secondary)' }}>
+              <span title={r.red ? 'These bills exceed your current balance — a paycheck must land first' : undefined}>{r.label}</span>
+              <span style={{ fontVariantNumeric: 'tabular-nums' }}>{r.val}</span>
+            </div>
+          ))}
+          {needByDate && incomingPay != null && (
+            <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 6 }}>
+              {money(incomingPay)} in pay lands {needByDate}, refilling Bills for the weeks after.
+            </div>
+          )}
         </div>
 
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',

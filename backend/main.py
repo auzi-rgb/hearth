@@ -899,47 +899,25 @@ def cash_flow_projection(conn, end_date, start_balance=None) -> list:
                 if m > 12:
                     m = 1
                     y += 1
-    # To tell whether a paycheck dated today has ALREADY posted (and is thus in
-    # start_balance, so projecting it again would double-count), we look at today's
-    # real SETTLED deposits into the Bills account. We use the transactions table
-    # (current) rather than detect_next_payday's paychecks table, which can lag the
-    # bank by a sync cycle — the lag is what once dropped a not-yet-posted payday
-    # and made the forecast dive falsely negative. Pending deposits are excluded:
-    # they're not yet in the balance. Each deposit is matched to the earner whose
-    # expected paycheck is CLOSEST, so one earner's deposit can't suppress another
-    # earner's not-yet-arrived paycheck.
-    _bills_acct = find_role_account(conn, "bills", "bills")
-    _bills_acct_id = _bills_acct["id"] if _bills_acct else None
-    _member_infos = [(m, detect_next_payday(conn, m["key"])) for m in get_household(conn)]
-    _member_amounts = [i["expected_amount"] for _, i in _member_infos if i.get("expected_amount")]
-    _today_deposits = []
-    if _bills_acct_id:
-        _today_deposits = [float(r["amount"]) for r in conn.execute(
-            """SELECT amount FROM transactions
-               WHERE account_id=? AND transaction_date=? AND amount>0
-                 AND (is_transfer IS NULL OR is_transfer=0)
-                 AND (is_pending IS NULL OR is_pending=0)""",
-            (_bills_acct_id, today.isoformat())).fetchall()]
-
-    def _already_posted_today(amt):
-        for dep in _today_deposits:
-            if not (amt * 0.7 <= dep <= amt * 1.4):
-                continue
-            # Only claim this deposit for the member it best matches.
-            if min(_member_amounts, key=lambda a: abs(a - dep)) == amt:
-                return True
-        return False
-
-    for member, info in _member_infos:
+    # Only project paychecks that land STRICTLY AFTER today. start_balance is
+    # get_account_balance() = SimpleFin's reported balance, which already reflects
+    # any deposit that has posted — even before its transaction row is delivered
+    # (SimpleFin bumps the balance ahead of the transaction feed). So a paycheck
+    # dated today is already baked into the balance the moment it lands; projecting
+    # it again double-counts (overstating safe-to-move by a whole paycheck — the
+    # dangerous direction). Matching the deposit in the transactions table can't
+    # save us here: the balance can move before the transaction exists, so there's
+    # nothing to match. Trusting the balance as complete-through-today is the safe,
+    # correct rule; the only cost is that on payday morning (before the deposit
+    # posts) the forecast is conservative until the balance catches up.
+    for member in get_household(conn):
+        info = detect_next_payday(conn, member["key"])
         if info.get("next_date") and info.get("expected_amount"):
             d = date.fromisoformat(info["next_date"])
             amt = float(info["expected_amount"])
             label = member.get("label") or member["key"].capitalize()
             while d <= end_date:
-                # Project every paycheck from today forward; for one dated TODAY,
-                # skip it only if its deposit has already settled today.
-                include = d > today or not _already_posted_today(amt)
-                if include:
+                if d > today:
                     events.append((d, amt, f"{label} paycheck", "income"))
                 d += timedelta(weeks=info.get("interval_weeks", 2))
     events.sort(key=lambda x: x[0])
