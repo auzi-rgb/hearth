@@ -372,6 +372,29 @@ export default function Dashboard({ active, navigateTo }) {
         </div>
       )}
 
+      {/* A bill counted in the totals but absent from the forecast — the two
+          disagree until it gets a due day, so say so rather than quietly differ. */}
+      {data.unscheduled_bills?.length > 0 && (
+        <div style={{
+          background: 'rgba(255,149,0,0.08)', border: '1px solid rgba(255,149,0,0.3)',
+          borderRadius: 12, padding: '14px 18px', marginBottom: 16,
+        }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--orange, #FF9500)', marginBottom: 6 }}>
+            ⚠️ {data.unscheduled_bills.length === 1 ? 'A bill has' : `${data.unscheduled_bills.length} bills have`} no due day
+          </div>
+          {data.unscheduled_bills.map((b, i) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '3px 0' }}>
+              <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{b.name}</span>
+              <span style={{ fontVariantNumeric: 'tabular-nums', color: 'var(--orange, #FF9500)', fontWeight: 600 }}>{money(b.amount)}/mo</span>
+            </div>
+          ))}
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 8, lineHeight: 1.5 }}>
+            Counted in your monthly bills total but missing from the cash-flow forecast, so
+            &ldquo;safe to move&rdquo; is overstated by that much. Set a due day on the Bills tab.
+          </div>
+        </div>
+      )}
+
       {/* Overdraft warnings */}
       {data.overdraft_warnings?.length > 0 && (
         <div style={{

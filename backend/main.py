@@ -663,6 +663,48 @@ def _simulate_payoff_strategy(debts_input: list, extra_monthly: float, strategy:
         "timeline": timeline,
     }
 
+def derive_bill_day(conn, *, loan_id=None, account_id=None, merchant_pattern=None):
+    """Work out which day of the month a bill falls on, from data the app already
+    holds, instead of storing NULL and silently dropping the bill from the cash-flow
+    projection. In order: the linked loan's start_date (a loan recurs on the day it
+    started), then the most common day among matching transactions. Returns None only
+    when there is genuinely nothing to go on — and callers surface that rather than
+    swallowing it."""
+    if loan_id:
+        row = conn.execute("SELECT start_date FROM loans WHERE id=?", (loan_id,)).fetchone()
+        if row and row["start_date"]:
+            try:
+                return min(28, date.fromisoformat(row["start_date"]).day)
+            except (ValueError, TypeError):
+                pass
+    if merchant_pattern or account_id:
+        if merchant_pattern:
+            rows = conn.execute(
+                """SELECT transaction_date FROM transactions
+                   WHERE amount < 0 AND LOWER(description) LIKE ?
+                   ORDER BY transaction_date DESC LIMIT 12""",
+                (f"%{str(merchant_pattern).lower()}%",)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT transaction_date FROM transactions
+                   WHERE amount < 0 AND account_id=?
+                   ORDER BY transaction_date DESC LIMIT 12""",
+                (account_id,)
+            ).fetchall()
+        days = []
+        for r in rows:
+            try:
+                days.append(min(28, date.fromisoformat(r["transaction_date"]).day))
+            except (ValueError, TypeError):
+                pass
+        if days:
+            # mode, not mean: ACH drifts off a weekend by a day or two, and the
+            # most-repeated day is the real schedule while an average is a date
+            # the bill never actually falls on.
+            return max(set(days), key=days.count)
+    return None
+
 def next_bill_date(day_of_month: int, from_date: date = None) -> date:
     if from_date is None:
         from_date = date.today()
@@ -1743,6 +1785,18 @@ async def dashboard():
     # to a monthly equivalent. Hardline (must-pay bills + debt payments) is a
     # different kind of number than Contributions (chosen savings/investment
     # transfers) — only the sum leaves the account the same way.
+    # A bill with no schedule is counted in the totals below but cannot be placed on
+    # the timeline, so the forecast and the hardline silently disagree. Rather than
+    # let that pass unseen (it hid a $291.37/mo loan payment for months), report it.
+    unscheduled_bills = [
+        {"id": b["id"], "name": b["display_name"] or b["name"],
+         "amount": fmt_money(b["expected_amount"]), "payment_type": b["payment_type"]}
+        for b in conn.execute(
+            """SELECT id, name, display_name, expected_amount, payment_type FROM bills
+               WHERE is_active=1 AND day_of_month IS NULL
+                 AND NOT (frequency='weekly' AND day_of_week IS NOT NULL)"""
+        ).fetchall()
+    ]
     all_active_bills = conn.execute("SELECT expected_amount, frequency, payment_type FROM bills WHERE is_active=1").fetchall()
     def _meq(b):
         return float(b["expected_amount"]) * (52 / 12) if b["frequency"] == "weekly" else float(b["expected_amount"])
@@ -1952,6 +2006,7 @@ async def dashboard():
         "debt_free_months": debt_free_months,
         "debt_focus": debt_focus,
         "debt_change_month": debt_change_month,
+        "unscheduled_bills": unscheduled_bills,
         "overdraft_warnings": overdraft_warnings,
         "cash_flow_timeline": cash_flow_timeline,
     }
@@ -2318,9 +2373,15 @@ async def list_bills():
 async def create_bill(request: Request):
     body = await request.json()
     conn = get_db()
+    # Same rule as loan_set_bill: never store a monthly bill with no due day. A
+    # caller that omits it gets one derived from the loan/account/merchant history
+    # rather than a NULL that the projection would quietly skip.
+    _day = body.get("day_of_month") or derive_bill_day(
+        conn, loan_id=body.get("linked_loan_id"), account_id=body.get("linked_account_id"),
+        merchant_pattern=body.get("merchant_pattern") or body.get("name"))
     cur = conn.execute(
         "INSERT INTO bills (name, display_name, expected_amount, confidence, day_of_month, account_id, bill_type, payment_type, from_debt_budget, linked_loan_id, linked_account_id, notes, autopay, is_active) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
-        (body["name"], body.get("display_name") or None, body["expected_amount"], body.get("confidence", "fixed"), body.get("day_of_month"), body.get("account_id"), body.get("bill_type"), body.get("payment_type", "Recurring"), int(body.get("from_debt_budget") or 0), body.get("linked_loan_id"), body.get("linked_account_id"), body.get("notes"), int(body.get("autopay", 1)))
+        (body["name"], body.get("display_name") or None, body["expected_amount"], body.get("confidence", "fixed"), _day, body.get("account_id"), body.get("bill_type"), body.get("payment_type", "Recurring"), int(body.get("from_debt_budget") or 0), body.get("linked_loan_id"), body.get("linked_account_id"), body.get("notes"), int(body.get("autopay", 1)))
     )
     conn.commit()
     bid = cur.lastrowid
@@ -2698,9 +2759,17 @@ async def loan_set_bill(loan_id: int, request: Request):
         conn.commit()
         conn.close()
         return {"bill_id": existing["id"], "created": False, "amount": float(amount)}
+    # day_of_month was hard-coded None here, so EVERY bill created from a loan was
+    # invisible to cash_flow_projection and upcoming_bills while still counting in
+    # hardline_total — totals and forecast disagreed and nothing said so. Derive it
+    # instead (a loan recurs on the day it started; failing that, from payment
+    # history), and allow it to be passed explicitly.
+    day_of_month = body.get("day_of_month") or derive_bill_day(
+        conn, loan_id=loan_id, merchant_pattern=body.get("merchant_pattern") or name
+    )
     cur = conn.execute(
         "INSERT INTO bills (name, expected_amount, confidence, day_of_month, account_id, payment_type, from_debt_budget, linked_loan_id, is_active) VALUES (?,?,?,?,?,?,?,?,1)",
-        (name, float(amount), "fixed", None, None, "Loan", 1, loan_id)
+        (name, float(amount), "fixed", day_of_month, None, "Loan", 1, loan_id)
     )
     conn.commit()
     bill_id = cur.lastrowid
