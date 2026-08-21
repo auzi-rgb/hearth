@@ -224,11 +224,32 @@ reading a field by name in multiple places.
   forward and never disagree. `safe_today` = lowest projected balance − buffer;
   `suggested_transfer` = max(0, safe_today); `overdraft_warnings` when a bill would breach
   the buffer.
+  - **Same-day events apply income first.** Banks don't publish intra-day posting order, so
+    the only knowable figure is the end-of-day balance; income-first ordering makes each
+    day's low equal that. Sorting by date alone left bills ahead of paychecks and produced
+    phantom dips that zeroed safe-to-transfer and fired false overdraft warnings.
+  - **It starts from `get_available_balance` (posted + pending), not the posted balance.**
+    SimpleFin's balance snapshot runs up to a day behind its transaction feed, so a paycheck
+    that has arrived as a pending deposit is real money the posted figure hasn't caught up
+    with. A paycheck dated today is projected only if `_deposit_already_landed` finds no
+    matching deposit — closing both halves of the double-count. Pendings older than 14 days
+    are ignored, and `sync` clears the pending flag when the settled version arrives.
+- **The Bills card identity (`X = Y + Z`):** what's in Bills (`bills_balance`) = free to move
+  (`suggested_transfer`) + needed for bills (`bills_needed`). `bills_needed` is the deepest
+  cumulative dip between now and `bills_low_date` plus the buffer — a property of the
+  bill/income *schedule*, so it holds steady while the other two move together. When the
+  balance can't cover it, `suggested_transfer` pins at 0 and `bills_shortfall` says how far
+  short. All three come from the one projection, so they always reconcile.
 - **Committed budget (U) & planned transfers:** U is set by Commit Budget; editing category
   limits is a draft until committed. `compute_planned_transfers` funds Food with U split
   50/50 across the two transfer days; each transfer may shift within `transfer_window_days`
   to the earliest day it's fully safe (e.g. waits for a paycheck the day after) — only
   capped if no day in the window works.
+- **CSV import dedup:** `import_csv` matches on (date, amount) *count-aware* — only as many
+  CSV rows as the DB already holds for that pair count as already-present, so a genuine second
+  same-priced purchase on the same day still imports. Matching on description alone let every
+  row SimpleFin had already delivered back in as a duplicate (the bank's CSV text never equals
+  SimpleFin's). CSV-imported rows are identifiable by `posted_date IS NULL`.
 - **Bill tiers:** `Recurring` (monthly bill), `Loan`/`Debt` (debt payoff, linked to a loan
   or credit account), `Contribution` (chosen savings/investment). Monthly Bills + Debt =
   the hardline. Weekly bills use `frequency='weekly'`+`day_of_week`; monthly cost is
