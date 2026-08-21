@@ -65,3 +65,42 @@ Bill 116 has no due day (invisible to the projection, counted in the totals); tw
 "next paycheck" dates on one screen; `bills_before_next_pay` ignores paid status; the
 projection doesn't reserve Food transfers; dead payload fields; Chase Freedom stopped
 syncing on Jun 16.
+
+## Follow-up, same day — available balance correction
+
+The first pass defined `get_available_balance` as posted **plus all pendings**, which showed
+$4,680.07 against a real balance of $3,103.26 and read as a double-counted paycheck. Wrong
+premise: banks hold an incoming deposit until it posts, so a pending *credit* is not
+spendable, while a pending *debit* has already reduced what you can spend.
+
+Available is now posted plus pending **debits** only — $3,203.26 − $100.00 = $3,103.26,
+user-verified. Pending credits move into `cash_flow_projection` as future events, so the
+payday blind spot stays closed without overstating today's cash. `_deposit_already_landed`
+now requires a POSTED deposit. The dashboard's Accounts strip was also still reporting the
+raw posted balance while the Bills card reported available — one screen, two Bills numbers.
+Cash accounts now use one basis everywhere.
+
+## Follow-up — the two KNOWN-ISSUES items
+
+**Bill 116 "Citi Bank Personal Loan" now has a due day.** Payment history shows
+"PIL CITIBANK CITIXFR" at $291.37, 14 payments from 2025-06 to 2026-07, always the 27th
+except when it fell on a weekend or holiday (28th/29th — ACH drift, not a schedule change).
+Set to day 27, $291.37 (was $291.00), `merchant_pattern='pil citibank'`. No active bill is
+invisible to the projection any more.
+
+**Chase wasn't a dead connection — it was reconnected under a new SimpleFin id.** On
+2026-06-16 a second account row appeared (`ACT-30422cb2…`); sync's name-clash guard inserted
+it INACTIVE so it couldn't double-count, and the warning was never acted on. So the account
+everything reads (11) froze at 2026-06-16 while the one actually receiving data (13) was
+excluded from every view.
+
+Acct 13 was a strict superset of 11 — all 85 of its transactions plus 21 newer. Merged the
+21 onto acct 11 with `is_transfer` recomputed by sync's own rule, dropped 13's duplicate
+copies, repointed 11 at the live SimpleFin id and balance (−7,547.47 @ 2026-08-20), deleted
+13. Archived to `backend/backups/chase-acct13-archive-20260820.csv`.
+
+Deliberately did **not** use the reactivate endpoint: it blanket-clears `is_transfer` on
+every transaction of the account (see KNOWN-ISSUES), which would have corrupted flags.
+Moving rows onto the already-active 11 left its 85 good rows untouched.
+
+Still stale: Personal Loan (8337) (Happen Bank / LendingClub), balance_date 2026-06-21.

@@ -26,11 +26,10 @@ When one is fixed, remove it here and note it in that session's `HEARTH-CHANGES-
   yields a 500 instead of a clean 400.
 
 ## Dashboard logic (found 2026-08-20, not yet fixed)
-- **A bill with no `day_of_month` is invisible to the cash flow but counted in the totals.**
-  Bill 116 "Citi Bank Personal Loan" ($291/mo) is `frequency='monthly'` with `day_of_month`
-  NULL, so `cash_flow_projection` and `upcoming_bills` both skip it while `hardline_total`
-  and `monthly_bills_total` include it — safe-to-move is overstated by $291 and nothing
-  warns. Either give it a due day or make an unscheduled bill loud in both places.
+- **An unscheduled bill is still silently skipped.** Bill 116 was fixed (day 27, $291.37),
+  but the underlying hole remains: a `monthly` bill with `day_of_month` NULL is dropped by
+  `cash_flow_projection` and `upcoming_bills` while `hardline_total` and
+  `monthly_bills_total` still count it. Nothing warns. Make it loud in both places.
 - **Two different "next paycheck" dates on one screen.** `days_until_paycheck` comes from
   `detect_next_payday` (can be today), `bills_until_next_paycheck_date` from the projection
   (always future). They disagreed by a week on 2026-08-20.
@@ -48,8 +47,16 @@ When one is fixed, remove it here and note it in that session's `HEARTH-CHANGES-
   the household's real Bills→Food transfers are ad hoc bank transfers, never recorded there.
 
 ## Data freshness
-- **Chase Freedom Unlimited (0406) stopped syncing.** `balance_date` 2026-06-16, newest
-  transaction 2026-06-15. Its balance still feeds net worth and the debt payoff plan.
+- **Personal Loan (8337) (Happen Bank / LendingClub) is stale.** `balance_date` 2026-06-21;
+  the $910.09 bill is still being paid from Bills each month, so the loan is live but its
+  balance hasn't moved in two months. Feeds net worth and the payoff plan. Check whether the
+  SimpleFin connection needs re-authorizing — and whether it is the same
+  reconnected-under-a-new-id case Chase turned out to be.
+- **A reconnected account goes inactive and nothing chases the warning.** When an
+  institution is reconnected, SimpleFin issues a new account id; sync's name-clash guard
+  inserts it INACTIVE (correctly, to avoid double-counting) and returns a warning that is
+  only shown on the next dashboard load. Chase sat frozen for two months this way. The
+  warning should persist until acted on, with a one-click "this replaces that account" merge.
 
 ## Measurement tension (not a bug, but a decision to make)
 - **`L` (actual living spend) is measured on a different basis than `U` (budget).** The
