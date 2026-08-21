@@ -863,37 +863,38 @@ def get_account_balance(conn, account_id: int) -> float:
     return fmt_money(row["bal"])
 
 def get_available_balance(conn, account_id: int) -> float:
-    """Posted balance plus everything still pending — what the account actually
-    holds once in-flight items settle. SimpleFin's reported balance is a snapshot
-    taken at accounts.balance_date and runs up to a day behind the transaction
-    feed, so a paycheck that has already arrived as a PENDING deposit sits in
-    neither the posted balance nor (being dated today) the forward projection.
-    Starting the cash-flow projection from the posted balance alone therefore
-    drops real money — a whole paycheck on payday. Pending rows are by definition
-    not yet in the posted balance, so adding them double-counts nothing."""
+    """The bank's AVAILABLE balance: posted, minus pending debits — never plus
+    pending credits. Banks hold an incoming deposit until it posts, so a pending
+    paycheck is not yet spendable, while a pending charge has already reduced what
+    you can spend. Counting pending credits here showed more money than the account
+    held and read as a double-counted paycheck. Money that is merely *incoming*
+    belongs in the forward projection instead (cash_flow_projection adds pending
+    credits as future events), not in today's balance.
+
+    Only recent pendings count. sync clears the flag when the settled version
+    arrives, but if a pending row were ever orphaned (the bank drops it, a
+    description drifts past recognition) a stale flag would skew this indefinitely.
+    Real pendings settle within days, so a fortnight is a generous ceiling."""
     bal = get_account_balance(conn, account_id)
-    # Only recent pendings. sync clears the flag when the settled version arrives,
-    # but if a pending row is ever orphaned (the bank drops it, a description
-    # changes past recognition) a stale flag would keep inflating this balance
-    # indefinitely. Real pendings settle within a few days, so a fortnight is a
-    # generous ceiling that bounds the damage to nothing.
     cutoff = (date.today() - timedelta(days=14)).isoformat()
     row = conn.execute(
         """SELECT COALESCE(SUM(amount), 0) AS s FROM transactions
-           WHERE account_id=? AND is_pending=1 AND transaction_date >= ?""",
+           WHERE account_id=? AND is_pending=1 AND amount < 0 AND transaction_date >= ?""",
         (account_id, cutoff)
     ).fetchone()
     return fmt_money(bal + float(row["s"] or 0))
 
 def _deposit_already_landed(conn, account_id: int, on_date, amount: float) -> bool:
-    """Has a deposit of roughly `amount` already hit this account on `on_date`?
-    Posted OR pending — either way it is already inside get_available_balance,
-    so projecting the paycheck again on top of it would double-count."""
+    """Has a deposit of roughly `amount` already POSTED to this account on
+    `on_date`? Only posted deposits count: those are inside the balance the
+    projection starts from, so re-projecting them would double-count. A deposit
+    that is merely pending is NOT in that balance — it is still incoming, and is
+    added to the timeline as a future event instead."""
     if not account_id:
         return False
     return conn.execute(
         """SELECT 1 FROM transactions WHERE account_id=? AND transaction_date=?
-           AND amount > 0 AND amount >= ? LIMIT 1""",
+           AND amount > 0 AND is_pending=0 AND amount >= ? LIMIT 1""",
         (account_id, on_date.isoformat(), amount * 0.5)
     ).fetchone() is not None
 
@@ -966,6 +967,20 @@ def cash_flow_projection(conn, end_date, start_balance=None) -> list:
     # Income-first also makes each day's low equal its end-of-day balance — the
     # only figure genuinely knowable a month out, since banks do not publish
     # intra-day posting order.
+    # Pending CREDITS are incoming money the bank hasn't released yet: excluded
+    # from today's available balance (see get_available_balance) but real, so they
+    # belong in the forecast. Dated on/after today so they land as future events —
+    # a pending deposit from a past date settles imminently, so it is pulled to
+    # today rather than dropped.
+    if bills_acct_id:
+        for r in conn.execute(
+            """SELECT transaction_date, amount, description FROM transactions
+               WHERE account_id=? AND is_pending=1 AND amount > 0 AND transaction_date >= ?""",
+            (bills_acct_id, (today - timedelta(days=14)).isoformat())
+        ).fetchall():
+            d = max(date.fromisoformat(r["transaction_date"]), today)
+            if d <= end_date:
+                events.append((d, float(r["amount"]), f"{r['description'][:28].strip()} (pending)", "income"))
     events.sort(key=lambda x: (x[0], 0 if x[3] == "income" else 1))
     running = start_balance
     timeline = []
@@ -1508,12 +1523,19 @@ async def dashboard():
     accounts = conn.execute("SELECT * FROM accounts WHERE is_active=1").fetchall()
     account_balances = {}
     for a in accounts:
+        # Cash accounts report the bank's AVAILABLE balance so this strip can never
+        # disagree with the Bills card below it — two different Bills numbers on one
+        # screen reads as a double-count. Credit/loan/investment balances have no
+        # meaningful "available" and stay as reported.
+        bal = (get_available_balance(conn, a["id"])
+               if a["type"] in ("checking", "savings")
+               else get_account_balance(conn, a["id"]))
         account_balances[a["id"]] = {
             "id": a["id"],
             "name": a["name"],
             "type": a["type"],
             "institution": a["institution"],
-            "balance": get_account_balance(conn, a["id"]),
+            "balance": bal,
         }
     assets = sum(
         v["balance"] for v in account_balances.values()
