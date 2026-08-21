@@ -862,6 +862,34 @@ def get_account_balance(conn, account_id: int) -> float:
     ).fetchone()
     return fmt_money(row["bal"])
 
+def get_available_balance(conn, account_id: int) -> float:
+    """Posted balance plus everything still pending — what the account actually
+    holds once in-flight items settle. SimpleFin's reported balance is a snapshot
+    taken at accounts.balance_date and runs up to a day behind the transaction
+    feed, so a paycheck that has already arrived as a PENDING deposit sits in
+    neither the posted balance nor (being dated today) the forward projection.
+    Starting the cash-flow projection from the posted balance alone therefore
+    drops real money — a whole paycheck on payday. Pending rows are by definition
+    not yet in the posted balance, so adding them double-counts nothing."""
+    bal = get_account_balance(conn, account_id)
+    row = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS s FROM transactions WHERE account_id=? AND is_pending=1",
+        (account_id,)
+    ).fetchone()
+    return fmt_money(bal + float(row["s"] or 0))
+
+def _deposit_already_landed(conn, account_id: int, on_date, amount: float) -> bool:
+    """Has a deposit of roughly `amount` already hit this account on `on_date`?
+    Posted OR pending — either way it is already inside get_available_balance,
+    so projecting the paycheck again on top of it would double-count."""
+    if not account_id:
+        return False
+    return conn.execute(
+        """SELECT 1 FROM transactions WHERE account_id=? AND transaction_date=?
+           AND amount > 0 AND amount >= ? LIMIT 1""",
+        (account_id, on_date.isoformat(), amount * 0.5)
+    ).fetchone() is not None
+
 def get_setting(conn, key: str, default=None):
     row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
     return row["value"] if row else default
@@ -875,9 +903,10 @@ def cash_flow_projection(conn, end_date, start_balance=None) -> list:
     simulation, so months carry forward instead of each view restarting from
     today's balance and disagreeing about the future."""
     today = date.today()
+    bills_acct = find_role_account(conn, "bills", "bills")
+    bills_acct_id = bills_acct["id"] if bills_acct else None
     if start_balance is None:
-        acct = find_role_account(conn, "bills", "bills")
-        start_balance = get_account_balance(conn, acct["id"]) if acct else 0.0
+        start_balance = get_available_balance(conn, bills_acct_id) if bills_acct_id else 0.0
     paid_lookup = {
         (r["bill_id"], r["month"])
         for r in conn.execute("SELECT bill_id, month FROM bill_paid_months").fetchall()
@@ -899,17 +928,17 @@ def cash_flow_projection(conn, end_date, start_balance=None) -> list:
                 if m > 12:
                     m = 1
                     y += 1
-    # Only project paychecks that land STRICTLY AFTER today. start_balance is
-    # get_account_balance() = SimpleFin's reported balance, which already reflects
-    # any deposit that has posted — even before its transaction row is delivered
-    # (SimpleFin bumps the balance ahead of the transaction feed). So a paycheck
-    # dated today is already baked into the balance the moment it lands; projecting
-    # it again double-counts (overstating safe-to-move by a whole paycheck — the
-    # dangerous direction). Matching the deposit in the transactions table can't
-    # save us here: the balance can move before the transaction exists, so there's
-    # nothing to match. Trusting the balance as complete-through-today is the safe,
-    # correct rule; the only cost is that on payday morning (before the deposit
-    # posts) the forecast is conservative until the balance catches up.
+    # A paycheck dated TODAY is projected only if it has not actually shown up
+    # yet. The old rule ("never project today's paycheck") assumed SimpleFin's
+    # balance runs AHEAD of the transaction feed; in practice it runs up to a day
+    # BEHIND, so on payday the deposit sat in neither the balance nor the forecast
+    # and a whole paycheck silently vanished — which on 2026-08-20 dropped
+    # safe-to-move from $1,745 to $0 and raised a false overdraft warning.
+    # start_balance is now get_available_balance() (posted + pending), so anything
+    # that has landed — posted or still pending — is already counted; we ask the
+    # transactions table directly whether that is so, rather than inferring it
+    # from the date. Not yet arrived: project it. Already arrived: skip it. Both
+    # halves of the double-count are closed.
     for member in get_household(conn):
         info = detect_next_payday(conn, member["key"])
         if info.get("next_date") and info.get("expected_amount"):
@@ -917,10 +946,20 @@ def cash_flow_projection(conn, end_date, start_balance=None) -> list:
             amt = float(info["expected_amount"])
             label = member.get("label") or member["key"].capitalize()
             while d <= end_date:
-                if d > today:
+                if d > today or not _deposit_already_landed(conn, bills_acct_id, d, amt):
                     events.append((d, amt, f"{label} paycheck", "income"))
                 d += timedelta(weeks=info.get("interval_weeks", 2))
-    events.sort(key=lambda x: x[0])
+    # Within a single date, apply income BEFORE bills. Sorting on the date alone
+    # left the loop insertion order intact (every bill, then every paycheck), so
+    # any day where a paycheck and bills coincide showed a phantom intra-day dip:
+    # on 2026-09-03 rent drove the running balance to -191.14 before that same
+    # morning's paycheck was applied, though the day actually ends at +1,385.67.
+    # Everything downstream reads the MINIMUM of this running balance, so one
+    # phantom dip zeroed safe-to-transfer and fired a false overdraft warning.
+    # Income-first also makes each day's low equal its end-of-day balance — the
+    # only figure genuinely knowable a month out, since banks do not publish
+    # intra-day posting order.
+    events.sort(key=lambda x: (x[0], 0 if x[3] == "income" else 1))
     running = start_balance
     timeline = []
     for evt_date, delta, label, kind in events:
@@ -1531,9 +1570,16 @@ async def dashboard():
     next_pay_date = date.fromisoformat(next_pay["next_date"])
     bills_account = find_role_account(conn, "bills", "bills")
     if bills_account:
-        bills_balance = get_account_balance(conn, bills_account["id"])
+        # Available, not posted: SimpleFin's balance snapshot lags the transaction
+        # feed by up to a day, so pending items (today's paycheck included) are
+        # real money the posted figure hasn't caught up with yet. Both halves are
+        # reported so the UI can explain any gap against the bank's website.
+        bills_balance_posted = get_account_balance(conn, bills_account["id"])
+        bills_balance = get_available_balance(conn, bills_account["id"])
     else:
-        bills_balance = sum(v["balance"] for v in account_balances.values() if v["type"] == "checking")
+        bills_balance_posted = sum(v["balance"] for v in account_balances.values() if v["type"] == "checking")
+        bills_balance = bills_balance_posted
+    bills_pending = round(bills_balance - bills_balance_posted, 2)
     bills_before_pay = sum(
         b["amount"] for b in upcoming_bills if date.fromisoformat(b["due_date"]) <= next_pay_date
     )
@@ -1583,9 +1629,11 @@ async def dashboard():
     # itself flags as needed to avoid an overdraft.
     cash_flow_timeline = cash_flow_projection(conn, today + timedelta(days=60), start_balance=bills_balance)
     min_balance = bills_balance
+    min_balance_date = today.isoformat()
     overdraft_warnings = []
     for _e in cash_flow_timeline:
-        min_balance = min(min_balance, _e["balance"])
+        if _e["balance"] < min_balance:
+            min_balance, min_balance_date = _e["balance"], _e["date"]
         if _e["kind"] == "bill" and _e["balance"] < safe_buffer:
             overdraft_warnings.append({
                 "bill_name": _e["label"],
@@ -1599,6 +1647,14 @@ async def dashboard():
     # current balance exceeds that reserve plus the buffer itself.
     reserve_needed = max(0.0, bills_balance - min_balance)
     safe_today = min_balance - safe_buffer
+    # The three numbers the Bills card shows, as one identity you can check by eye:
+    #     X (what's in Bills)  =  Y (free to move)  +  Z (must stay for bills)
+    # Z is a property of the SCHEDULE, not of the balance — it's the deepest
+    # cumulative dip between now and the low point, plus the buffer — so it holds
+    # steady while X and Y move together. When X falls below what the bills need,
+    # Y pins at 0 and bills_shortfall says how far short you are.
+    bills_needed = round(bills_balance - max(0.0, safe_today), 2)
+    bills_shortfall = round(max(0.0, safe_buffer - min_balance), 2)
 
     # "Amount needed to cover bills until next paycheck": sum bills due STRICTLY
     # BEFORE the next paycheck lands. Bills due ON payday are covered by that day's
@@ -1806,6 +1862,12 @@ async def dashboard():
         "tmrs_balance": fmt_money(tmrs_balance),
         "safe_spend_buffer": fmt_money(safe_buffer),
         "bills_balance": fmt_money(bills_balance),
+        "bills_balance_posted": fmt_money(bills_balance_posted),
+        "bills_pending": bills_pending,
+        "bills_needed": bills_needed,
+        "bills_shortfall": bills_shortfall,
+        "bills_low_point": fmt_money(min_balance),
+        "bills_low_date": min_balance_date,
         "bills_before_next_pay": fmt_money(bills_before_pay),
         "bills_left_month": fmt_money(bills_left_month),
         "projected_income_month": fmt_money(projected_income_month),
@@ -1977,7 +2039,10 @@ async def calendar_data(month: str = None):
             "account": t["account_name"], "is_pending": bool(t["is_pending"]),
         })
     bills_acct = find_role_account(conn, "bills", "bills")
-    bills_bal     = get_account_balance(conn, bills_acct["id"]) if bills_acct else 0.0
+    # Available, not posted — must match the basis the shared cash-flow projection
+    # starts from, or the Calendar's headline balance and its own balance overlay
+    # would disagree by the pending amount.
+    bills_bal     = get_available_balance(conn, bills_acct["id"]) if bills_acct else 0.0
     safe_buffer = float(get_setting(conn, "safe_spend_buffer", "200"))
 
     _today = date.today()
@@ -3598,6 +3663,18 @@ async def import_csv(account_id: int, file: UploadFile = File(...)):
     errors = []
     debug_skipped = []
     now = datetime.now().isoformat()
+    # Count-aware dedup. Matching on the exact description alone let every row
+    # SimpleFin had already delivered come back in as a duplicate, because the
+    # bank's CSV text never equals SimpleFin's ("Tle at Lake Geor Payment" vs
+    # "TLE at Lake Geor PAYMENT ***1303") — one import added 35 phantom rows to
+    # the Bills account. Matching on amount+date alone would go too far the other
+    # way and silently drop a second, genuine same-priced purchase on the same day.
+    # So: count how many rows the DB ALREADY holds for each (date, amount), and
+    # treat only that many CSV rows as already-present. The (N+1)th is real and
+    # gets inserted. Exact date on purpose — every duplicate observed shared its
+    # date, and widening to ±1 day would start eating real repeat purchases.
+    existing_counts = {}
+    matched_counts = {}
 
     for row in reader:
         try:
@@ -3627,14 +3704,20 @@ async def import_csv(account_id: int, file: UploadFile = File(...)):
 
             amount = float(amount_str.replace(",", "").replace("$", ""))
 
-            existing = conn.execute(
-                "SELECT id, description FROM transactions WHERE account_id=? AND transaction_date=? AND amount=? AND description=?",
-                (account_id, txn_date, amount, desc)
-            ).fetchone()
-            if existing:
+            key = (txn_date, amount)
+            if key not in existing_counts:
+                existing_counts[key] = conn.execute(
+                    "SELECT COUNT(*) FROM transactions WHERE account_id=? AND transaction_date=? AND amount=?",
+                    (account_id, txn_date, amount)
+                ).fetchone()[0]
+            already = matched_counts.get(key, 0)
+            if already < existing_counts[key]:
+                matched_counts[key] = already + 1
                 skipped += 1
                 if len(debug_skipped) < 20:
-                    debug_skipped.append(f"EXACT_DUP | {txn_date} | {amount} | pending={is_pending} | desc={repr(desc[:60])}")
+                    debug_skipped.append(
+                        f"ALREADY_HAVE {already + 1}/{existing_counts[key]} | {txn_date} | {amount} | desc={repr(desc[:60])}"
+                    )
                 continue
 
             # Always use keyword-based categorizer — USAA category names don't match internal categories

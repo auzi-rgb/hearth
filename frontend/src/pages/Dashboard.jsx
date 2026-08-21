@@ -300,6 +300,20 @@ export default function Dashboard({ active, navigateTo }) {
     : null
   const incomingPay     = data.incoming_next_paycheck
   const billsCovered    = billsBal >= needForBills
+  // X = Y + Z, the identity the Bills card shows. Z ("needed for bills") is the
+  // deepest cumulative dip between now and the projection's low point plus the
+  // buffer — a property of the bill/income SCHEDULE, so it holds steady while X
+  // and Y move together. Derived from the same simulation as safe-to-move, so
+  // the three numbers always reconcile.
+  const billsNeeded     = data.bills_needed ?? 0
+  const billsShortfall  = data.bills_shortfall ?? 0
+  const billsPending    = data.bills_pending ?? 0
+  const billsPosted     = data.bills_balance_posted ?? billsBal
+  const lowDate         = data.bills_low_date
+    ? new Date(data.bills_low_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+    : null
+  // The reserve actually driving safe-to-move: everything except the buffer.
+  const reserveForBills = Math.max(0, billsNeeded - safeBuffer)
 
   // Next paycheck = the next one still COMING (from the cash-flow projection),
   // not today's already-deposited one. Using the projection's next-paycheck date
@@ -519,8 +533,38 @@ export default function Dashboard({ active, navigateTo }) {
           Bills Account
         </div>
         <div style={{ fontSize: numSz, fontWeight: 700, letterSpacing: '-0.05em',
-          color: 'var(--text-primary)', lineHeight: 1, marginBottom: 22 }}>
+          color: 'var(--text-primary)', lineHeight: 1, marginBottom: billsPending ? 4 : 14 }}>
           {money(billsBal)}
+        </div>
+        {billsPending !== 0 && (
+          <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginBottom: 14 }}
+            title="Your bank's posted balance plus anything still pending. SimpleFin's balance snapshot can run a day behind, so pending items — today's paycheck included — are real money it hasn't caught up with yet.">
+            {money(billsPosted)} posted {billsPending > 0 ? '+' : '−'} {money(Math.abs(billsPending))} pending
+          </div>
+        )}
+
+        {/* The split the household actually needs: of what's in Bills, how much
+            must stay for bills and how much is genuinely free. Adds back to the
+            balance above by construction, so it can be checked at a glance. */}
+        <div style={{ display: 'flex', gap: 10, marginBottom: 20 }}>
+          <div style={{ flex: 1, padding: '10px 12px', background: 'var(--bg-subtle)', borderRadius: 10 }}>
+            <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.6,
+              color: 'var(--text-tertiary)' }}>Needed for bills</div>
+            <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.03em', fontVariantNumeric: 'tabular-nums',
+              color: 'var(--text-primary)' }}>{money(billsNeeded)}</div>
+            <div style={{ fontSize: 10.5, color: 'var(--text-tertiary)', marginTop: 1 }}>
+              {lowDate ? `must stay through ${lowDate}` : 'must stay in Bills'}
+            </div>
+          </div>
+          <div style={{ flex: 1, padding: '10px 12px', background: 'var(--bg-subtle)', borderRadius: 10 }}>
+            <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.6,
+              color: 'var(--text-tertiary)' }}>Free to move</div>
+            <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.03em', fontVariantNumeric: 'tabular-nums',
+              color: suggestedXfer > 0 ? 'var(--accent-text)' : 'var(--text-tertiary)' }}>{money(suggestedXfer)}</div>
+            <div style={{ fontSize: 10.5, color: 'var(--text-tertiary)', marginTop: 1 }}>
+              {billsShortfall > 0 ? `short ${money(billsShortfall)}` : 'to Food'}
+            </div>
+          </div>
         </div>
 
         <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0',
@@ -555,13 +599,17 @@ export default function Dashboard({ active, navigateTo }) {
           </div>
           {[
             { label: "What's in Bills now", val: money(billsBal) },
-            { label: `− Bills due before next paycheck${needByDate ? ` (${needByDate})` : ''}`,
-              val: '−' + money(needForBills), red: !billsCovered },
+            // The reserve comes from the simulation's LOW POINT, not from "bills due
+            // before the next paycheck". Those two coincide only when the low point
+            // happens to fall just before payday; in any other month the displayed
+            // subtraction wouldn't add up to the answer beneath it.
+            { label: `− Bills to cover${lowDate ? ` through ${lowDate}` : ''}`,
+              val: '−' + money(reserveForBills), red: billsShortfall > 0 },
             { label: '− Safety buffer', val: '−' + money(safeBuffer) },
           ].map((r, i) => (
             <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '4px 0',
               color: r.red ? 'var(--red)' : 'var(--text-secondary)' }}>
-              <span title={r.red ? 'These bills exceed your current balance — a paycheck must land first' : undefined}>{r.label}</span>
+              <span title={r.red ? 'These bills exceed what Bills will hold — a paycheck must land first' : undefined}>{r.label}</span>
               <span style={{ fontVariantNumeric: 'tabular-nums' }}>{r.val}</span>
             </div>
           ))}
