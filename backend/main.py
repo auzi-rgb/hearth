@@ -872,9 +872,16 @@ def get_available_balance(conn, account_id: int) -> float:
     drops real money — a whole paycheck on payday. Pending rows are by definition
     not yet in the posted balance, so adding them double-counts nothing."""
     bal = get_account_balance(conn, account_id)
+    # Only recent pendings. sync clears the flag when the settled version arrives,
+    # but if a pending row is ever orphaned (the bank drops it, a description
+    # changes past recognition) a stale flag would keep inflating this balance
+    # indefinitely. Real pendings settle within a few days, so a fortnight is a
+    # generous ceiling that bounds the damage to nothing.
+    cutoff = (date.today() - timedelta(days=14)).isoformat()
     row = conn.execute(
-        "SELECT COALESCE(SUM(amount), 0) AS s FROM transactions WHERE account_id=? AND is_pending=1",
-        (account_id,)
+        """SELECT COALESCE(SUM(amount), 0) AS s FROM transactions
+           WHERE account_id=? AND is_pending=1 AND transaction_date >= ?""",
+        (account_id, cutoff)
     ).fetchone()
     return fmt_money(bal + float(row["s"] or 0))
 

@@ -129,21 +129,36 @@ async def run_sync():
                 # Dedup — exact match first, then fuzzy match for same amount ±1 day
                 # (SimpleFin sometimes delivers the same transaction with two different
                 # description formats: raw bank text and a cleaned merchant name)
+                # A row we already hold may still be flagged pending. If this
+                # delivery is the settled version, clear the flag instead of just
+                # skipping — a pending marker that never clears makes
+                # get_available_balance() add the amount on top of a posted balance
+                # that already contains it, double-counting it forever. This bites
+                # hardest on paychecks, which is exactly what that balance is for.
+                def _settle(row):
+                    if row["is_pending"] and not pending:
+                        conn.execute(
+                            "UPDATE transactions SET is_pending=0, posted_date=? WHERE id=?",
+                            (posted_date, row["id"])
+                        )
+
                 exists = conn.execute(
-                    """SELECT id FROM transactions WHERE account_id=? AND transaction_date=?
+                    """SELECT id, is_pending FROM transactions WHERE account_id=? AND transaction_date=?
                        AND amount=? AND description=?""",
                     (acct_id, txn_date, amount, desc)
                 ).fetchone()
                 if exists:
+                    _settle(exists)
                     continue
                 fuzzy = conn.execute(
-                    """SELECT id FROM transactions
+                    """SELECT id, is_pending FROM transactions
                        WHERE account_id=? AND amount=?
                          AND ABS(julianday(transaction_date) - julianday(?)) <= 1
                          AND description != ?""",
                     (acct_id, amount, txn_date, desc)
                 ).fetchone()
                 if fuzzy:
+                    _settle(fuzzy)
                     continue
 
                 desc_upper = desc.upper()
