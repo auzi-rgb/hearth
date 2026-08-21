@@ -65,6 +65,10 @@ export default function Settings({ active, onCrumb }) {
   const [xferPhrases, setXferPhrases] = useState('')
   const [xferPhrasesMsg, setXferPhrasesMsg] = useState(null)
   const [xferPhrasesSaving, setXferPhrasesSaving] = useState(false)
+  const [pendWindow, setPendWindow] = useState('')
+  const [payMatch, setPayMatch] = useState('')
+  const [balMsg, setBalMsg] = useState(null)
+  const [balSaving, setBalSaving] = useState(false)
 
   const [icalUrl, setIcalUrl] = useState(null)
   const [icalCopied, setIcalCopied] = useState(false)
@@ -162,6 +166,8 @@ export default function Settings({ active, onCrumb }) {
         setHasSimplefin(d.has_simplefin === 'True' || d.has_simplefin === true)
         if (d.paycheck_min_amount) setPaycheckMin(d.paycheck_min_amount)
         if (d.transfer_detection_phrases) setXferPhrases(d.transfer_detection_phrases)
+        setPendWindow(d.pending_window_days ?? '')
+        setPayMatch(d.paycheck_match_ratio ?? '')
       }).catch(() => {})
     fetch(`${API}/ai/health`)
       .then(r => r.json())
@@ -302,6 +308,21 @@ export default function Settings({ active, onCrumb }) {
       setXferPhrasesMsg('Saved — applies to newly synced transactions')
     } catch (e) { setXferPhrasesMsg('!' + e.message) }
     finally { setXferPhrasesSaving(false) }
+  }
+
+  async function saveBalanceTuning() {
+    setBalSaving(true); setBalMsg(null)
+    try {
+      for (const [k, v] of [['pending_window_days', pendWindow], ['paycheck_match_ratio', payMatch]]) {
+        const r = await fetch(`${API}/settings/${k}`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value: String(v ?? '').trim() }),
+        })
+        if (!r.ok) throw new Error('Save failed')
+      }
+      setBalMsg('Saved — applies on the next dashboard load')
+    } catch (e) { setBalMsg('!' + e.message) }
+    finally { setBalSaving(false) }
   }
 
   async function resetSimplefin() {
@@ -521,6 +542,27 @@ export default function Settings({ active, onCrumb }) {
             {xferPhrasesSaving ? 'Saving…' : 'Save'}
           </button>
           <StatusMsg msg={xferPhrasesMsg} />
+        </Section>
+        <Section title="Balance & Paycheck Matching">
+          <Field label="Pending window (days)"
+            hint="How far back a still-pending transaction is trusted. Pending charges reduce your available balance; the window stops an orphaned pending row (one the bank quietly dropped) from skewing it forever. Blank = 14.">
+            <input className="apple-input" type="number" min="1" step="1" value={pendWindow}
+              onChange={e => setPendWindow(e.target.value)} placeholder="14" style={{ width: 110, fontSize: 13 }} />
+          </Field>
+          <Field label="Paycheck match ratio"
+            hint="How close a deposit must be to the expected paycheck to count as that paycheck having arrived (0.5 = at least half). Raise it if a large non-payroll deposit is being mistaken for payday; lower it if a partial deposit should still count. Blank = 0.5.">
+            <input className="apple-input" type="number" min="0.1" max="1" step="0.05" value={payMatch}
+              onChange={e => setPayMatch(e.target.value)} placeholder="0.5" style={{ width: 110, fontSize: 13 }} />
+          </Field>
+          <button className="apple-btn-primary" onClick={saveBalanceTuning} disabled={balSaving} style={{ fontSize: 13 }}>
+            {balSaving ? 'Saving…' : 'Save'}
+          </button>
+          <StatusMsg msg={balMsg} />
+          <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 10, lineHeight: 1.5 }}>
+            A deposit already on the books — posted <em>or</em> pending — is treated as arrived and is
+            never forecast again. Payroll posts overnight, so the reported balance often contains a
+            deposit the bank still calls pending; forecasting it on top would count the paycheck twice.
+          </div>
         </Section>
         </>
       )}

@@ -104,3 +104,28 @@ every transaction of the account (see KNOWN-ISSUES), which would have corrupted 
 Moving rows onto the already-active 11 left its 85 good rows untouched.
 
 Still stale: Personal Loan (8337) (Happen Bank / LendingClub), balance_date 2026-06-21.
+
+## Follow-up — pending credits removed from the forecast too
+
+The available-balance correction was still half wrong. Excluding pending credits from the
+*balance* was right; adding them to the *forecast* as future events was not. Austin caught
+it from the Calendar timeline: starting balance $3,103.26, then a `STAFFMARK INVEST
+(pending)` row for +$1,576.81 building to $4,680.07 — the same paycheck counted twice.
+
+**Why:** payroll posts overnight, so SimpleFin's 05:29 balance snapshot already contained
+the deposit while USAA's CSV still carried `Status=pending`. The code trusted that stale
+flag over the reported balance. A deposit's pending flag says nothing about whether the
+balance holds it.
+
+Pending credits are now excluded from both the balance and the timeline, and
+`_deposit_already_landed` counts a deposit on the books — posted or pending — as arrived.
+The reported balance is the authority; a flag on one imported row is not.
+
+Result: X $3,103.26, Z $2,743.14, **Y $360.12** (was showing $1,936.93 off the doubled
+paycheck). Low point $410.12 on Aug 26, the day before payday.
+
+**Build rule 1 applied:** the two thresholds this logic depends on were literals buried
+mid-function (a 14-day pending window, a 0.5 paycheck-match ratio). Both are now settings
+read via `_setting_float` with documented defaults, and both are editable in
+Settings → Connections → "Balance & Paycheck Matching". Blank or invalid falls back to the
+default.

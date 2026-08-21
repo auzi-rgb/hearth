@@ -132,6 +132,9 @@ briefings. **`ai_facts`**, **`ai_sessions`** — AI memory. **`merchant_rules`**
 - `payday_dow_{key}`, `payday_frequency_{key}`, `payday_anchor_{key}` — per member.
 - `committed_budget`, `committed_budget_at` — the committed living budget (y).
 - `transfer_schedule` — JSON `{"mode":"days","days":[1,15]}` or `{"mode":"payday"}`.
+- `pending_window_days` (default 14) — how far back a still-pending row is trusted;
+  `paycheck_match_ratio` (default 0.5) — how close a deposit must be to the expected
+  paycheck to count as arrived. Both edited in Settings → Connections.
 - `transfer_window_days` (default 3), `safe_spend_buffer` (default 200),
   `paycheck_min_amount` (default 500), `transfer_detection_phrases`,
   `budget_baseline_income` (optional override).
@@ -228,12 +231,16 @@ reading a field by name in multiple places.
     the only knowable figure is the end-of-day balance; income-first ordering makes each
     day's low equal that. Sorting by date alone left bills ahead of paychecks and produced
     phantom dips that zeroed safe-to-transfer and fired false overdraft warnings.
-  - **It starts from `get_available_balance` (posted + pending), not the posted balance.**
-    SimpleFin's balance snapshot runs up to a day behind its transaction feed, so a paycheck
-    that has arrived as a pending deposit is real money the posted figure hasn't caught up
-    with. A paycheck dated today is projected only if `_deposit_already_landed` finds no
-    matching deposit — closing both halves of the double-count. Pendings older than 14 days
-    are ignored, and `sync` clears the pending flag when the settled version arrives.
+  - **It starts from `get_available_balance` = posted + pending DEBITS.** Pending charges
+    have already reduced what you can spend. Pending **credits** are deliberately excluded
+    everywhere — from the balance *and* from the forecast. A deposit's pending flag says
+    nothing about whether the balance contains it: payroll posts overnight, so SimpleFin's
+    morning snapshot picks it up while the bank still reports `Status=pending` for another
+    day. The **reported balance is the authority** on what's in the account; a flag on one
+    imported row is not. `_deposit_already_landed` therefore treats a deposit on the books —
+    posted or pending — as arrived, and never projects it again. `sync` clears the pending
+    flag when the settled version arrives. Tunable via `pending_window_days` and
+    `paycheck_match_ratio` (Settings → Connections), never hard-coded.
 - **The Bills card identity (`X = Y + Z`):** what's in Bills (`bills_balance`) = free to move
   (`suggested_transfer`) + needed for bills (`bills_needed`). `bills_needed` is the deepest
   cumulative dip between now and `bills_low_date` plus the buffer — a property of the
