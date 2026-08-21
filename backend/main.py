@@ -62,287 +62,45 @@ def get_db():
     return conn
 
 def init_db():
-    conn = get_db()
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS accounts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            type TEXT NOT NULL,
-            institution TEXT,
-            simplefin_id TEXT,
-            is_active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            account_id INTEGER NOT NULL,
-            amount REAL NOT NULL,
-            description TEXT,
-            category TEXT,
-            transaction_date TEXT NOT NULL,
-            posted_date TEXT,
-            is_pending INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (account_id) REFERENCES accounts(id)
-        );
-        CREATE TABLE IF NOT EXISTS bills (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            expected_amount REAL NOT NULL,
-            confidence TEXT NOT NULL DEFAULT 'fixed',
-            day_of_month INTEGER,
-            account_id INTEGER,
-            is_active INTEGER NOT NULL DEFAULT 1
-        );
-        CREATE TABLE IF NOT EXISTS loans (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            type TEXT NOT NULL,
-            original_balance REAL,
-            current_balance REAL,
-            interest_rate REAL,
-            monthly_payment REAL,
-            payments_made INTEGER DEFAULT 0,
-            total_payments INTEGER,
-            start_date TEXT
-        );
-        CREATE TABLE IF NOT EXISTS paychecks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            person TEXT NOT NULL,
-            expected_amount REAL,
-            actual_amount REAL,
-            expected_date TEXT,
-            actual_date TEXT,
-            is_third_friday_period INTEGER DEFAULT 0,
-            notes TEXT
-        );
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        );
-        CREATE TABLE IF NOT EXISTS sync_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            synced_at TEXT NOT NULL,
-            accounts_updated INTEGER DEFAULT 0,
-            transactions_added INTEGER DEFAULT 0,
-            status TEXT NOT NULL,
-            error_message TEXT
-        );
-        CREATE TABLE IF NOT EXISTS net_worth_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            recorded_at TEXT NOT NULL,
-            assets REAL NOT NULL,
-            liabilities REAL NOT NULL,
-            net_worth REAL NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL UNIQUE,
-            hashed_password TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS merchant_rules (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            pattern TEXT NOT NULL UNIQUE,
-            category TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS budgets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            category TEXT NOT NULL UNIQUE,
-            monthly_limit REAL NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS ignored_bill_patterns (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            pattern TEXT NOT NULL UNIQUE,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS categories (
-            name TEXT PRIMARY KEY,
-            parent TEXT,
-            is_base INTEGER NOT NULL DEFAULT 0,
-            FOREIGN KEY (parent) REFERENCES categories(name)
-        );
-    """)
-    conn.commit()
+    """Bring the database schema to head. Alembic owns it — nothing here creates or
+    alters a table any more.
 
-    # Migrations — idempotent column additions
-    for col, typedef in [("current_balance", "REAL"), ("balance_date", "TEXT"), ("interest_rate", "REAL"), ("minimum_payment", "REAL")]:
-        try:
-            conn.execute(f"ALTER TABLE accounts ADD COLUMN {col} {typedef}")
-            conn.commit()
-        except Exception:
-            pass
-    try:
-        conn.execute("ALTER TABLE bills ADD COLUMN bill_type TEXT")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE bills ADD COLUMN payment_type TEXT")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE bills ADD COLUMN from_debt_budget INTEGER DEFAULT 0")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE bills ADD COLUMN linked_loan_id INTEGER")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE bills ADD COLUMN notes TEXT")
-        conn.commit()
-    except Exception:
-        pass
-    conn.execute("UPDATE bills SET payment_type = 'Recurring' WHERE payment_type IS NULL")
-    conn.commit()
-    try:
-        conn.execute("ALTER TABLE bills ADD COLUMN linked_account_id INTEGER")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE bills ADD COLUMN frequency TEXT")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE bills ADD COLUMN day_of_week INTEGER")
-        conn.commit()
-    except Exception:
-        pass
-    # These two columns were originally added by hand directly on the production
-    # database and never made it into code — a fresh database crashed on any
-    # endpoint that read them. Now migrated like every other column.
-    try:
-        conn.execute("ALTER TABLE accounts ADD COLUMN nickname TEXT")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE bills ADD COLUMN display_name TEXT")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        # Explicit merchant text linking a bill to its bank transactions — set by
-        # the Spending page's "add as bill" flow. When present, it replaces the
-        # fragile name[:8] LIKE matching for history/creep/rolling stats.
-        conn.execute("ALTER TABLE bills ADD COLUMN merchant_pattern TEXT")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        # Autopay: 1 = paid automatically from the Bills account, needs no human
-        # action (no paid-checkbox, no "looks paid" nag, muted in the calendar).
-        # Defaults to 1 because the household runs bills on autopay — the few
-        # manual ones get un-flagged. Only manual bills surface as action items.
-        conn.execute("ALTER TABLE bills ADD COLUMN autopay INTEGER NOT NULL DEFAULT 1")
-        conn.commit()
-    except Exception:
-        pass
-    conn.execute("UPDATE bills SET frequency = 'monthly' WHERE frequency IS NULL")
-    conn.commit()
-    # One-time reclassification: savings/investment transfers that were entered
-    # as Recurring bills become Contributions — chosen allocations, not hardline
-    # obligations. New ones get the type picked in the bill modal; this only
-    # catches the ones created before the type existed. Idempotent.
-    conn.execute("""
-        UPDATE bills SET payment_type='Contribution'
-        WHERE payment_type='Recurring' AND (
-            LOWER(name) LIKE '%roth%' OR LOWER(name) LIKE '%hysa%'
-            OR LOWER(name) LIKE '%529%' OR LOWER(name) LIKE '%high-yield%'
-            OR LOWER(name) LIKE '%high yield%'
-        )
-    """)
-    conn.commit()
-    try:
-        conn.execute("ALTER TABLE transactions ADD COLUMN is_transfer INTEGER NOT NULL DEFAULT 0")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        # 1 = category came from an explicit merchant rule or a manual edit (confirmed).
-        # 0 = category is the raw keyword-guess fallback, never reviewed by a human.
-        # Existing history backfills to confirmed — this is a forward-looking flag, not
-        # a retroactive audit of years of transactions the household already trusts.
-        conn.execute("ALTER TABLE transactions ADD COLUMN category_confirmed INTEGER NOT NULL DEFAULT 1")
-        conn.commit()
-    except Exception:
-        pass
-    # Mark all existing internal transfer transactions so they are excluded from spending
-    conn.execute("""
-        UPDATE transactions SET is_transfer=1
-        WHERE is_transfer=0
-          AND (
-            LOWER(description) LIKE '%usaa funds transfer%'
-            OR LOWER(description) LIKE '%funds transfer db%'
-            OR LOWER(description) LIKE '%funds transfer cr%'
-          )
-    """)
-    conn.commit()
+    This used to be ~280 lines of `CREATE TABLE IF NOT EXISTS` plus fifteen
+    `ALTER TABLE ... ADD COLUMN` calls wrapped in bare `try/except`, re-executed on
+    every boot. That worked, but it meant the schema was whatever sequence of edits
+    had accumulated, with no record of order, no way to review a change before it
+    ran, and no way to reproduce the database from scratch and know you had the same
+    thing. It also carried three data backfills that re-ran forever and could
+    silently overrule the household's own edits (see migration 0002).
 
-    # Per-month paid tracking for bill calendar toggles
-    conn.execute("""CREATE TABLE IF NOT EXISTS bill_paid_months (
-        id       INTEGER PRIMARY KEY AUTOINCREMENT,
-        bill_id  INTEGER NOT NULL,
-        month    TEXT    NOT NULL,
-        paid_date TEXT,
-        UNIQUE(bill_id, month)
-    )""")
-    conn.commit()
+    Migrations live in `backend/migrations/versions/`. To change the schema, add a
+    revision — never hand-edit the production database.
+    """
+    try:
+        from alembic import command
+        from alembic.config import Config
+    except ImportError as exc:  # fail fast and say exactly what is missing
+        raise RuntimeError(
+            "Alembic is required to start Hearth — it owns the database schema. "
+            "Install it with: python3 -m pip install --user -r backend/requirements.txt"
+        ) from exc
 
-    # Bills → Food transfers: the app suggests an amount; recording what was
-    # actually moved is what turns the suggestion into a trackable habit.
-    conn.execute("""CREATE TABLE IF NOT EXISTS transfers (
-        id               INTEGER PRIMARY KEY AUTOINCREMENT,
-        transfer_date    TEXT NOT NULL,
-        amount           REAL NOT NULL,
-        suggested_amount REAL,
-        notes            TEXT,
-        created_at       TEXT NOT NULL
-    )""")
-    # Month in Review report cards — data is the computed JSON snapshot
-    conn.execute("""CREATE TABLE IF NOT EXISTS monthly_reports (
-        id         INTEGER PRIMARY KEY AUTOINCREMENT,
-        month      TEXT NOT NULL UNIQUE,
-        data       TEXT NOT NULL,
-        created_at TEXT NOT NULL
-    )""")
-    # Nightly AI coach briefings — generated overnight, read instantly by the UI
-    conn.execute("""CREATE TABLE IF NOT EXISTS ai_briefings (
-        id            INTEGER PRIMARY KEY AUTOINCREMENT,
-        briefing_date TEXT NOT NULL UNIQUE,
-        content       TEXT NOT NULL,
-        model         TEXT,
-        created_at    TEXT NOT NULL
-    )""")
-    conn.commit()
+    ini = os.path.join(os.path.dirname(os.path.abspath(__file__)), "alembic.ini")
+    if not os.path.exists(ini):
+        raise RuntimeError(f"Alembic config missing at {ini} — cannot verify the schema.")
 
-    # AI long-term memory tables
-    conn.execute("""CREATE TABLE IF NOT EXISTS ai_facts (
-        id               INTEGER PRIMARY KEY AUTOINCREMENT,
-        fact             TEXT NOT NULL,
-        category         TEXT NOT NULL DEFAULT 'general',
-        created_at       TEXT NOT NULL,
-        last_confirmed_at TEXT NOT NULL,
-        source_session_id INTEGER
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS ai_sessions (
-        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-        started_at   TEXT NOT NULL,
-        ended_at     TEXT NOT NULL,
-        message_count INTEGER NOT NULL DEFAULT 0,
-        summary      TEXT,
-        transcript   TEXT
-    )""")
-    conn.commit()
+    cfg = Config(ini)
+    try:
+        command.upgrade(cfg, "head")
+    except Exception as exc:
+        # A schema that did not reach head means every query below is a guess.
+        # Refuse to serve rather than run against an unknown shape.
+        raise RuntimeError(
+            f"Database migration failed, refusing to start: {exc}. "
+            f"Backups are in backend/backups/."
+        ) from exc
+    logger.info("Database schema at head")
 
-    conn.close()
 
 def _bootstrap_auth():
     """Ensure JWT secret and default admin user exist. Logs temp password once."""
@@ -2380,8 +2138,8 @@ async def create_bill(request: Request):
         conn, loan_id=body.get("linked_loan_id"), account_id=body.get("linked_account_id"),
         merchant_pattern=body.get("merchant_pattern") or body.get("name"))
     cur = conn.execute(
-        "INSERT INTO bills (name, display_name, expected_amount, confidence, day_of_month, account_id, bill_type, payment_type, from_debt_budget, linked_loan_id, linked_account_id, notes, autopay, is_active) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
-        (body["name"], body.get("display_name") or None, body["expected_amount"], body.get("confidence", "fixed"), _day, body.get("account_id"), body.get("bill_type"), body.get("payment_type", "Recurring"), int(body.get("from_debt_budget") or 0), body.get("linked_loan_id"), body.get("linked_account_id"), body.get("notes"), int(body.get("autopay", 1)))
+        "INSERT INTO bills (name, display_name, expected_amount, confidence, day_of_month, account_id, bill_type, payment_type, from_debt_budget, linked_loan_id, linked_account_id, notes, autopay, frequency, is_active) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
+        (body["name"], body.get("display_name") or None, body["expected_amount"], body.get("confidence", "fixed"), _day, body.get("account_id"), body.get("bill_type"), body.get("payment_type", "Recurring"), int(body.get("from_debt_budget") or 0), body.get("linked_loan_id"), body.get("linked_account_id"), body.get("notes"), int(body.get("autopay", 1)), body.get("frequency") or "monthly")
     )
     conn.commit()
     bid = cur.lastrowid
@@ -2768,8 +2526,8 @@ async def loan_set_bill(loan_id: int, request: Request):
         conn, loan_id=loan_id, merchant_pattern=body.get("merchant_pattern") or name
     )
     cur = conn.execute(
-        "INSERT INTO bills (name, expected_amount, confidence, day_of_month, account_id, payment_type, from_debt_budget, linked_loan_id, is_active) VALUES (?,?,?,?,?,?,?,?,1)",
-        (name, float(amount), "fixed", day_of_month, None, "Loan", 1, loan_id)
+        "INSERT INTO bills (name, expected_amount, confidence, day_of_month, account_id, payment_type, from_debt_budget, linked_loan_id, frequency, is_active) VALUES (?,?,?,?,?,?,?,?,?,1)",
+        (name, float(amount), "fixed", day_of_month, None, "Loan", 1, loan_id, "monthly")
     )
     conn.commit()
     bill_id = cur.lastrowid
@@ -3103,7 +2861,7 @@ async def link_transaction_to_bill(request: Request):
         except (ValueError, TypeError):
             pass
         cur = conn.execute(
-            "INSERT INTO bills (name, expected_amount, confidence, day_of_month, account_id, payment_type, from_debt_budget, is_active) VALUES (?,?,?,?,?,?,0,1)",
+            "INSERT INTO bills (name, expected_amount, confidence, day_of_month, account_id, payment_type, from_debt_budget, frequency, is_active) VALUES (?,?,?,?,?,?,0,'monthly',1)",
             (
                 body.get("name") or _clean_bill_name(txn["description"] or "New Bill"),
                 abs(float(txn["amount"])),

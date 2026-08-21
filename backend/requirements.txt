@@ -11,3 +11,10 @@ passlib==1.7.4
 # Keep bcrypt below 4.1 unless passlib is replaced.
 bcrypt==3.2.2
 slowapi==0.1.9
+
+# Alembic owns the database schema (see docs/migrations.md). It pulls SQLAlchemy,
+# which Hearth does NOT otherwise use — the app talks to SQLite through stdlib
+# sqlite3 and every migration is hand-written. Installed to user site the same way
+# the rest of these were: python3 -m pip install --user --break-system-packages -r requirements.txt
+alembic==1.19.1
+SQLAlchemy==2.0.52

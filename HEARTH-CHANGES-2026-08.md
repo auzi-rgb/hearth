@@ -129,3 +129,38 @@ mid-function (a 14-day pending window, a 0.5 paycheck-match ratio). Both are now
 read via `_setting_float` with documented defaults, and both are editable in
 Settings → Connections → "Balance & Paycheck Matching". Blank or invalid falls back to the
 default.
+
+## Alembic adopted — the schema becomes reproducible
+
+Austin's reframing of the GitHub-ready rule: *"I should be able to delete all my accounts
+and then resync that data fresh and get the same results I see now."* A schema that only
+exists as the residue of past edits cannot give you that, so Alembic went in first (build
+rule 9) before any further structural work.
+
+- `alembic==1.19.1` + `SQLAlchemy==2.0.52` installed to user site, matching how the
+  existing deps live in `~/.local` (Ubuntu 24.04 marks system python PEP-668 managed).
+  SQLAlchemy is a transitive dependency only — the app still uses stdlib `sqlite3`, and
+  with no ORM models every migration is hand-written. bcrypt 3.2.2 pin untouched.
+- `0001_baseline` captures the schema **verbatim from the production database** rather
+  than retyped, so `alembic upgrade head` on an empty file reproduces it exactly.
+  Verified: 20 objects, zero DDL differences, column lists match on accounts/bills/
+  transactions. Production was `stamp`ed at it rather than running it.
+- `init_db()` went from ~283 lines of `CREATE TABLE IF NOT EXISTS` + fifteen
+  `ALTER TABLE ... ADD COLUMN` in bare `try/except` to a single `alembic upgrade head`
+  that refuses to start the app if the schema is not at head (rule 8, fail fast).
+- **A real bug fell out of this.** `init_db()` carried three data backfills that re-ran on
+  every restart. One re-applied `is_transfer=1` to anything matching the USAA transfer
+  wording — so `PUT /api/transactions/{id}/transfer` let the household mark something as
+  NOT a transfer, and the next service restart silently put it back. Same for the
+  roth/hysa/529 → Contribution reclassification. Both are now `0002_startup_backfills`,
+  running once. A user's decision has to outlive a restart.
+- The third backfill (`frequency='monthly' WHERE frequency IS NULL`) was papering over
+  three of the four `INSERT INTO bills` paths never setting the column. Fixed at the
+  inserts; the migration only closes out pre-existing rows.
+- `docs/migrations.md` documents the workflow, including `HEARTH_DB_PATH` for rehearsing a
+  migration against a copy, why autogenerate produces empty migrations here, and why
+  `render_as_batch` is required on SQLite.
+
+**Verified end to end:** a database created from nothing but `alembic upgrade head` is
+schema-identical to production, and the app boots and serves `/api/dashboard` against it.
+Production integrity check ok, 3,077 transactions intact, revision `0002_startup_backfills`.

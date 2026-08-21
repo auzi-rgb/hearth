@@ -10,6 +10,11 @@ When one is fixed, remove it here and note it in that session's `HEARTH-CHANGES-
   imported. Highest-priority: it's silent data loss.
 - **Account deactivate→reactivate corrupts `is_transfer`** — reactivating clears the flag on
   ALL the account's transactions, including genuine internal transfers.
+- **Startup no longer re-runs data backfills** (fixed 2026-08-20) — three UPDATEs at the
+  top of `init_db()` re-ran on every boot; one re-flagged `is_transfer` on transactions the
+  household had manually un-flagged, silently overruling them. Moved to migration
+  `0002_startup_backfills`, which runs once. If you find another "one-time" fix living in
+  startup, it belongs in a revision.
 - **DB connections leak on error** — endpoints open a connection without try/finally, so a
   mid-request exception leaves it unclosed. Harmless single-user, but sloppy.
 

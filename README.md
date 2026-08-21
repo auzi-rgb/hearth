@@ -60,7 +60,9 @@ Also: **Y = P − B − D − C** (available to live on); **s = Y − U**. Break
 
 ## Tech stack
 
-- **Backend:** Python 3 (system python, no venv), FastAPI, SQLite (WAL), `python-jose` (JWT,
+- **Backend:** Python 3 (system python, no venv — deps at user site in `~/.local`),
+  FastAPI, SQLite (WAL), Alembic (schema migrations; brings SQLAlchemy, unused by the
+  app itself), `python-jose` (JWT,
   8h expiry), `passlib`+`bcrypt` (passwords), `slowapi` (rate limiting — currently only on
   `/api/ai/chat`), APScheduler, SimpleFin bank sync. Dependencies pinned in
   `backend/requirements.txt`.
@@ -80,9 +82,12 @@ Also: **Y = P − B − D − C** (available to live on); **s = Y − U**. Break
 
 ## Database
 
-**Path:** `backend/finance.db` (gitignored). All schema changes are idempotent
-`ALTER TABLE … ADD COLUMN` in `try/except` inside `init_db()`, safe to re-run on restart.
-**Never ALTER the production DB by hand — add a migration.**
+**Path:** `backend/finance.db` (gitignored). **Alembic owns the schema** —
+`init_db()` runs `alembic upgrade head` and refuses to start if that fails; it creates
+and alters nothing itself. Revisions live in `backend/migrations/versions/` and are
+written by hand (`op.execute`), since Hearth uses stdlib `sqlite3` with no ORM models
+and there is nothing to autogenerate against. Full workflow: **`docs/migrations.md`**.
+**Never ALTER the production DB by hand — add a revision.**
 
 **`bills`** — payment obligations
 ```
