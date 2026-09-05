@@ -3812,18 +3812,21 @@ async def import_csv(account_id: int, file: UploadFile = File(...)):
     errors = []
     debug_skipped = []
     now = datetime.now().isoformat()
-    # Count-aware dedup. Matching on the exact description alone let every row
-    # SimpleFin had already delivered come back in as a duplicate, because the
-    # bank's CSV text never equals SimpleFin's ("Tle at Lake Geor Payment" vs
-    # "TLE at Lake Geor PAYMENT ***1303") — one import added 35 phantom rows to
-    # the Bills account. Matching on amount+date alone would go too far the other
-    # way and silently drop a second, genuine same-priced purchase on the same day.
-    # So: count how many rows the DB ALREADY holds for each (date, amount), and
-    # treat only that many CSV rows as already-present. The (N+1)th is real and
-    # gets inserted. Exact date on purpose — every duplicate observed shared its
-    # date, and widening to ±1 day would start eating real repeat purchases.
-    existing_counts = {}
-    matched_counts = {}
+    # Row-level dedup against real existing rows, not an abstract count. Matching
+    # on the exact description alone let every row SimpleFin had already delivered
+    # come back in as a duplicate, because the bank's CSV text never equals
+    # SimpleFin's ("Tle at Lake Geor Payment" vs "TLE at Lake Geor PAYMENT
+    # ***1303") — one import added 35 phantom rows to the Bills account. An
+    # earlier fix matched on exact (date, amount) only, which is too narrow the
+    # other way: confirmed in this DB as two live duplicates (Google Fi
+    # 2026-04-26/27 at $138.18, Frontpoint Security 2026-08-02/03 at $56.82) where
+    # the CSV's date landed one day off from what SimpleFin had already recorded
+    # for the same bill, so the exact-date match never saw it. So: match on amount
+    # within a ±1 day window (same tolerance sync.py already uses for its own
+    # dedup), description ignored, and claim each existing row AT MOST ONCE per
+    # import — a second genuine same-day, same-amount purchase still has no
+    # unclaimed row left to match and gets inserted rather than silently eaten.
+    claimed_ids = set()
 
     for row in reader:
         try:
@@ -3853,29 +3856,34 @@ async def import_csv(account_id: int, file: UploadFile = File(...)):
 
             amount = float(amount_str.replace(",", "").replace("$", ""))
 
-            key = (txn_date, amount)
-            if key not in existing_counts:
-                existing_counts[key] = conn.execute(
-                    "SELECT COUNT(*) FROM transactions WHERE account_id=? AND transaction_date=? AND amount=?",
-                    (account_id, txn_date, amount)
-                ).fetchone()[0]
-            already = matched_counts.get(key, 0)
-            if already < existing_counts[key]:
-                matched_counts[key] = already + 1
+            candidates = conn.execute(
+                """SELECT id FROM transactions WHERE account_id=? AND amount=?
+                   AND ABS(julianday(transaction_date) - julianday(?)) <= 1
+                   ORDER BY ABS(julianday(transaction_date) - julianday(?)) ASC, id ASC""",
+                (account_id, amount, txn_date, txn_date)
+            ).fetchall()
+            match = next((c for c in candidates if c["id"] not in claimed_ids), None)
+            if match:
+                claimed_ids.add(match["id"])
                 skipped += 1
                 if len(debug_skipped) < 20:
                     debug_skipped.append(
-                        f"ALREADY_HAVE {already + 1}/{existing_counts[key]} | {txn_date} | {amount} | desc={repr(desc[:60])}"
+                        f"ALREADY_HAVE (existing row {match['id']}) | {txn_date} | {amount} | desc={repr(desc[:60])}"
                     )
                 continue
 
             # Always use keyword-based categorizer — USAA category names don't match internal categories
             cat, cat_confirmed = auto_category_with_rules(conn, desc)
 
-            conn.execute(
+            cur = conn.execute(
                 "INSERT INTO transactions (account_id, amount, description, category, transaction_date, is_pending, category_confirmed, created_at) VALUES (?,?,?,?,?,?,?,?)",
                 (account_id, amount, desc, cat, txn_date, is_pending, cat_confirmed, now)
             )
+            # A row this same import just inserted is not a pre-existing duplicate —
+            # exclude it from matching a LATER csv row too, or two genuinely distinct
+            # same-amount charges within a day of each other in one export would eat
+            # each other (first one inserted, second one "finds" it as a dupe).
+            claimed_ids.add(cur.lastrowid)
             imported += 1
         except Exception as e:
             skipped += 1
