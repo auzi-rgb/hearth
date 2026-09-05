@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import Portal from '../components/Portal'
 
 const API = '/hearth/api'
-const GATEWAY = 'https://10.0.0.24/gateway/api'
+const GATEWAY = 'https://home-app-server.local/gateway/api'
 
 const DEFAULT_SYSTEM_PROMPT = 'You are a helpful home finance assistant. You have access to the household financial data provided. Answer questions accurately and helpfully. Be concise. Format money as dollar amounts.'
 

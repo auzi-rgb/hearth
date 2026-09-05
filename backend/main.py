@@ -1246,7 +1246,7 @@ async def calendar_ical_url():
 
 # ── AI chat — rate-limited, auth via router dep ───────────────────────────────
 
-GATEWAY_URL = "https://10.0.0.24/gateway/api"
+GATEWAY_URL = "https://home-app-server.local/gateway/api"
 
 @router.post("/api/ai/chat")
 @limiter.limit("20/minute")

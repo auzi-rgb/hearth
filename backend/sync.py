@@ -5,7 +5,7 @@ import json
 from datetime import datetime, date, timedelta
 import httpx
 
-GATEWAY_URL = "https://10.0.0.24/gateway/api"
+GATEWAY_URL = "https://home-app-server.local/gateway/api"
 
 # Bank-specific phrases that mark a transaction as an internal transfer (excluded
 # from spending). Overridable via the transfer_detection_phrases setting so a new

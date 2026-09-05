@@ -10,8 +10,9 @@ workflow* at the bottom). Open bugs live in `KNOWN-ISSUES.md`, not here.
 ## What it is
 
 A self-hosted home finance app for one household. FastAPI backend + SQLite + a React SPA.
-Runs on the app server (`home-app-server`, 10.0.0.24), served at `https://10.0.0.24/hearth/`
-via nginx reverse proxy.
+Runs on the app server (`home-app-server`), served at `https://home-app-server.local/hearth/`
+via nginx reverse proxy. Both this box and the AI node are on DHCP now (LAN moved off static
+10.0.0.0/24 addressing 2026-09-03) — reach them by mDNS hostname, never a pinned IP.
 
 **Purpose:** help the household live month-to-month instead of paycheck-to-paycheck, pay
 off debt first, then build savings. All income lands in the **Bills account**; bills and
@@ -73,9 +74,9 @@ Also: **Y = P − B − D − C** (available to live on); **s = Y − U**. Break
   `/api/health`, `/api/auth/login`, `/api/auth/change-password`. `src/api.js` patches
   `window.fetch` to attach the token and broadcast 401s. `jwt_secret` and a default `admin`
   user are bootstrapped on first run (temp password printed to the systemd journal once).
-- **AI:** the backend proxies AI calls to the gateway at `https://10.0.0.24/gateway/api`
-  (`GATEWAY_URL`, hardcoded), which routes to Ollama on austin-ai (10.0.0.8, MacBook Pro,
-  CPU/Metal). Self-signed cert → `verify=False` on those calls. **Principle: the AI only
+- **AI:** the backend proxies AI calls to the gateway at `https://home-app-server.local/gateway/api`
+  (`GATEWAY_URL`, hardcoded), which routes to Ollama on ai-node (`ai-node.local`, Dell Pro Max
+  Slim, RTX A1000 8GB). Self-signed cert → `verify=False` on those calls. **Principle: the AI only
   phrases numbers Python has already computed; it never calculates.**
 
 ---
@@ -288,7 +289,7 @@ reading a field by name in multiple places.
 - Deploy target is `/var/www/hearth/`.
 - Load Node via `source ~/.nvm/nvm.sh` before any `npm` command.
 - All API routes need a Bearer token — curl tests need one, or query SQLite directly.
-- The AI runs on austin-ai (10.0.0.8) via the gateway; keep AI to phrasing precomputed
+- The AI runs on ai-node (`ai-node.local`) via the gateway; keep AI to phrasing precomputed
   numbers, not calculating.
 - Google Calendar can't subscribe to the iCal feed (its servers can't reach the LAN); Apple
   Calendar on the home network can.

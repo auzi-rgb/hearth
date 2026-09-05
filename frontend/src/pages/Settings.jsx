@@ -574,7 +574,7 @@ export default function Settings({ active, onCrumb }) {
             {aiStatus === null && <span style={{ fontSize: 13, color: 'var(--text-tertiary)' }}>Checking connection…</span>}
             {aiStatus === 'ok' && <span style={{ fontSize: 13, color: 'var(--accent-text)', fontWeight: 500 }}>✓ Connected</span>}
             {aiStatus === 'error' && <span style={{ fontSize: 13, color: 'var(--red)', fontWeight: 500 }}>✕ Unreachable</span>}
-            <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>10.0.0.24 gateway</span>
+            <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>home-app-server.local gateway</span>
             <button className="apple-btn-secondary" onClick={testAiConnection} disabled={aiTesting}
               style={{ fontSize: 12, marginLeft: 'auto' }}>
               {aiTesting ? 'Testing…' : 'Test Connection'}
