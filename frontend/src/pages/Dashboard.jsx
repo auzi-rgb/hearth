@@ -314,6 +314,20 @@ export default function Dashboard({ active, navigateTo }) {
     : null
   // The reserve actually driving safe-to-move: everything except the buffer.
   const reserveForBills = Math.max(0, billsNeeded - safeBuffer)
+  // Safe-to-move is the MINIMUM of a 60-day projection, so a single event decides it
+  // and the other 30-odd bills are irrelevant to what's on screen. Naming that event
+  // turns an unexplained swing into something checkable.
+  const lowDriver       = data.bills_low_label
+  const cleanDriver     = lowDriver ? lowDriver.replace(/\s{2,}.*$/, '').trim() : null
+  // Bills still reserved although the statement already shows them paid. Each holds
+  // this number down by its full amount, silently, until the bill is ticked off.
+  const reservedPaid    = data.bills_reserved_but_paid || []
+  const reservedPaidTot = data.bills_reserved_but_paid_total ?? 0
+  // Bills due today that the forecast stopped reserving for, because the balance has
+  // already lost money the transaction feed cannot yet account for. Shown rather than
+  // applied silently — it is an inference, and it should be checkable.
+  const settledToday    = data.bills_settled_today || []
+  const settledTotal    = settledToday.reduce((a, b) => a + b.amount, 0)
 
   // Next paycheck = the next one still COMING (from the cash-flow projection),
   // not today's already-deposited one. Using the projection's next-paycheck date
@@ -566,6 +580,47 @@ export default function Dashboard({ active, navigateTo }) {
           </div>
         )}
 
+        {/* Due today and already taken: the money is gone from the balance but the
+            transaction has not arrived yet, so without this the bill is subtracted a
+            second time. Named explicitly because it is inferred, not observed. */}
+        {settledToday.length > 0 && (
+          <div style={{ background: 'rgba(52,199,89,0.07)', border: '1px solid rgba(52,199,89,0.25)',
+            borderRadius: 10, padding: '10px 12px', marginBottom: 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent-text)' }}>
+              {money(settledTotal)} due today looks already paid
+            </div>
+            {settledToday.map(b => (
+              <div key={b.id} style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginTop: 3 }}>
+                {b.name} — {money(b.amount)}
+              </div>
+            ))}
+            <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 6 }}>
+              The balance has already dropped by more than the bank has itemised, so these
+              aren't being held back twice. The statement usually catches up within a day.
+            </div>
+          </div>
+        )}
+
+        {/* Why the number may be lower than it should be. These bills have already
+            been paid according to the statement, but nothing has ticked them off, so
+            the forecast is still holding money back for them. */}
+        {reservedPaid.length > 0 && (
+          <div style={{ background: 'rgba(255,149,0,0.07)', border: '1px solid rgba(255,149,0,0.25)',
+            borderRadius: 10, padding: '10px 12px', marginBottom: 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--orange)' }}>
+              Holding back {money(reservedPaidTot)} for {reservedPaid.length === 1 ? 'a bill' : 'bills'} that already look paid
+            </div>
+            {reservedPaid.map(b => (
+              <div key={b.bill_id} style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginTop: 3 }}>
+                {b.name} — {money(b.amount)} reserved for {b.due_date.slice(5)}, but {money(b.paid_amount)} was paid {b.paid_date.slice(5)}
+              </div>
+            ))}
+            <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 6 }}>
+              Tick these off on the Bills tab and this number goes up by that much.
+            </div>
+          </div>
+        )}
+
         {/* The split the household actually needs: of what's in Bills, how much
             must stay for bills and how much is genuinely free. Adds back to the
             balance above by construction, so it can be checked at a glance. */}
@@ -578,6 +633,13 @@ export default function Dashboard({ active, navigateTo }) {
             <div style={{ fontSize: 10.5, color: 'var(--text-tertiary)', marginTop: 1 }}>
               {lowDate ? `must stay through ${lowDate}` : 'must stay in Bills'}
             </div>
+            {cleanDriver && (
+              <div style={{ fontSize: 10.5, color: 'var(--text-tertiary)', marginTop: 3,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                title={`The lowest point of the 60-day forecast falls on ${lowDate}, right after ${cleanDriver}. That single event sets this number.`}>
+                ↳ set by {cleanDriver}
+              </div>
+            )}
           </div>
           <div style={{ flex: 1, padding: '10px 12px', background: 'var(--bg-subtle)', borderRadius: 10 }}>
             <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.6,

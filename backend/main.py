@@ -55,10 +55,105 @@ def get_current_user(creds: HTTPAuthorizationCredentials = Depends(_bearer)) -> 
 
 # ── DB ────────────────────────────────────────────────────────────────────────
 
+def auto_paid_lookup(conn, months=None) -> dict:
+    """Which bills the statement already shows as paid, per month.
+
+    The app has always been able to work this out — /api/bills/reconcile has proved
+    paid status from transactions for as long as it has existed — but the answer was
+    never written anywhere the projection could read, so the household had to tick
+    35 bills a month by hand and the forecast reserved money for anything they missed.
+
+    Deliberately conservative, because a false positive frees money that is still owed:
+
+    * only bills with an explicit merchant_pattern. The name[:8] fallback is a raw
+      bank description and matches by accident.
+    * one transaction settles one bill. Several bills can share a pattern (two TLE
+      daycare payments a month; the Roth IRA and the 529 are both FID BKG SVC), so
+      candidates are assigned nearest-first by due day, then by amount, and a
+      transaction already claimed cannot be claimed again.
+    * only transactions dated on or before today. USAA publishes scheduled payments
+      as future-dated rows, and settling a bill against money that has not moved yet
+      frees cash that is still owed — the one direction of error that overdraws.
+    * a transaction only counts for a bill whose amount is in the same ballpark
+      (within 3x), which separates a $25 Roth contribution from a $100 529 one
+      without rejecting a utility bill that doubled in a cold month.
+    """
+    bills = [b for b in conn.execute(
+        "SELECT * FROM bills WHERE is_active=1 AND merchant_pattern IS NOT NULL").fetchall()]
+    if not bills:
+        return {}
+    acct = find_role_account(conn, "bills", "bills")
+    if not acct:
+        return {}
+    if months is None:
+        months = [date.today().strftime("%Y-%m")]
+    out = {}
+    for month in months:
+        txns = conn.execute(
+            """SELECT id, transaction_date, amount, description FROM transactions
+               WHERE account_id=? AND amount < 0 AND strftime('%Y-%m', transaction_date)=?
+                 AND transaction_date <= ?
+                 AND (is_transfer IS NULL OR is_transfer=0)
+                 AND (is_pending IS NULL OR is_pending=0)
+               ORDER BY transaction_date""",
+            (acct["id"], month, date.today().isoformat())
+        ).fetchall()
+        claimed = set()
+        # Weekly bills recur several times a month under one id and cannot be
+        # represented by a single mark, so they are never auto-settled (same rule
+        # the dashboard and calendar already apply to manual marks).
+        candidates = []
+        for b in bills:
+            if b["frequency"] == "weekly":
+                continue
+            term = _bill_match_term(b)
+            if len(term) < 3:
+                continue
+            exp = float(b["expected_amount"] or 0)
+            for t in txns:
+                if term not in _norm_desc(t["description"]):
+                    continue
+                act = abs(float(t["amount"]))
+                if exp > 0 and not (exp / 3 <= act <= exp * 3):
+                    continue
+                day_gap = abs(int(t["transaction_date"][-2:]) - (b["day_of_month"] or 15))
+                amt_gap = abs(act - exp)
+                candidates.append((day_gap, amt_gap, b["id"], t["id"], t["transaction_date"], act))
+        # Closest match wins the transaction; everything else must find another.
+        for day_gap, amt_gap, bill_id, txn_id, txn_date, act in sorted(candidates):
+            if txn_id in claimed or (bill_id, month) in out:
+                continue
+            claimed.add(txn_id)
+            out[(bill_id, month)] = {"paid_date": txn_date, "amount": act, "txn_id": txn_id}
+    return out
+
+def paid_lookup(conn, months=None) -> set:
+    """THE answer to "is this bill paid this month" for every page.
+
+    A manual tick always wins — including a manual "no, it isn't", which is why
+    bill_paid_months carries a state. Everything else falls back to what the
+    statement shows. One helper so the Dashboard, Calendar, Bills tab, monthly
+    report and AI briefing can never disagree about it again."""
+    manual_paid, manual_unpaid = set(), set()
+    for r in conn.execute("SELECT bill_id, month, state FROM bill_paid_months").fetchall():
+        (manual_unpaid if r["state"] == "unpaid" else manual_paid).add((r["bill_id"], r["month"]))
+    auto = set(auto_paid_lookup(conn, months).keys())
+    return (manual_paid | auto) - manual_unpaid
+
+def _norm_desc(s):
+    """Lowercase and collapse runs of whitespace. Bank descriptions are fixed-width
+    fields padded with spaces, and the padding is not stable: the same merchant
+    arrives as 'CAPITAL ONE      TRANSFER' and 'ACH - CAPITAL ONE     TRANSFER'.
+    Matching on the raw string made those different merchants. Worse, a bill whose
+    name is a padded description yields a match term with the padding baked in —
+    Hulu's was 'Hulu    ', which matched 3 of its 13 payments."""
+    return " ".join((s or "").lower().split())
+
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.create_function("norm_desc", 1, _norm_desc)
     return conn
 
 def init_db():
@@ -289,7 +384,7 @@ def _normalize_merchant(description: str) -> str:
 def _bill_match_term(bill) -> str:
     """The LIKE term connecting a bill to its transactions: the explicit
     merchant_pattern when the household linked one, else the legacy name prefix."""
-    return bill["merchant_pattern"] or bill["name"][:8]
+    return _norm_desc(bill["merchant_pattern"] or bill["name"][:8])
 
 def _bill_pattern_from_desc(description: str) -> str:
     """Pick the most distinctive merchant token from a bank description —
@@ -421,6 +516,11 @@ def _simulate_payoff_strategy(debts_input: list, extra_monthly: float, strategy:
         "timeline": timeline,
     }
 
+def _opt_int(v):
+    """None stays None so a COALESCE update leaves the column alone; anything the
+    caller actually sent becomes an int."""
+    return None if v is None else int(v)
+
 def derive_bill_day(conn, *, loan_id=None, account_id=None, merchant_pattern=None):
     """Work out which day of the month a bill falls on, from data the app already
     holds, instead of storing NULL and silently dropping the bill from the cash-flow
@@ -439,7 +539,7 @@ def derive_bill_day(conn, *, loan_id=None, account_id=None, merchant_pattern=Non
         if merchant_pattern:
             rows = conn.execute(
                 """SELECT transaction_date FROM transactions
-                   WHERE amount < 0 AND LOWER(description) LIKE ?
+                   WHERE amount < 0 AND norm_desc(description) LIKE ?
                    ORDER BY transaction_date DESC LIMIT 12""",
                 (f"%{str(merchant_pattern).lower()}%",)
             ).fetchall()
@@ -703,17 +803,91 @@ def _deposit_already_landed(conn, account_id: int, on_date, amount: float) -> bo
     if not account_id:
         return False
     ratio = _setting_float(conn, "paycheck_match_ratio", 0.5)
-    return conn.execute(
+    if conn.execute(
         """SELECT 1 FROM transactions WHERE account_id=? AND transaction_date=?
            AND amount > 0 AND amount >= ? LIMIT 1""",
         (account_id, on_date.isoformat(), amount * ratio)
-    ).fetchone() is not None
+    ).fetchone() is not None:
+        return True
+    # Second signal, and the one that actually fires on payday. The bank moves the
+    # reported balance the moment it posts payroll; SimpleFin's transaction feed
+    # trails it by up to two days, so the check above is guaranteed to say "no"
+    # precisely when it matters, and the paycheck gets counted twice — once inside
+    # the balance, once again as a future event. Comparing today's balance with the
+    # last one recorded on an earlier day sees the deposit as soon as the bank does.
+    #
+    # Only ever used to say "already landed" (never "hasn't"), so it can only remove
+    # a double-count, never invent one. Same-day debits shrink the jump, which is why
+    # a fraction of the expected amount is enough to count as arrival.
+    if on_date != date.today():
+        return False
+    # Yesterday's closing balance is the right baseline: it is the last figure that
+    # certainly predates today's deposit, whether payroll posted at 00:30 or at noon.
+    # Falling back to today's FIRST reading covers a database with no prior day yet —
+    # weaker (a deposit that beat the first sync is already inside it) but better than
+    # refusing to answer.
+    prev = conn.execute(
+        """SELECT balance FROM account_balance_history
+           WHERE account_id=? AND observed_date < ?
+           ORDER BY observed_date DESC, id DESC LIMIT 1""",
+        (account_id, on_date.isoformat())
+    ).fetchone() or conn.execute(
+        """SELECT balance FROM account_balance_history
+           WHERE account_id=? AND observed_date = ?
+           ORDER BY id ASC LIMIT 1""",
+        (account_id, on_date.isoformat())
+    ).fetchone()
+    if not prev:
+        return False
+    return (get_account_balance(conn, account_id) - float(prev["balance"])) >= amount * ratio
+
+def unreported_debits(conn, account_id: int, since_date) -> float:
+    """Money that has left this account without the transaction feed saying so.
+
+    SimpleFin moves the reported balance the moment the bank posts, and delivers the
+    matching transaction up to two days later. Measured over 2026-08-13..22 on the
+    Bills account, the feed failed to explain the balance movement on all nine days.
+    So on the day a bill is actually paid, the balance has already lost the money
+    while the bill still looks outstanding — and the projection subtracts it a second
+    time. On 2026-08-22 that hid $1,052.62 and read as "in the hole".
+
+    The residual below is the size of that blind spot: what the balance actually did,
+    minus what the feed can account for. Only the debit side is returned; unreported
+    CREDITS are the payday case and are handled by _deposit_already_landed."""
+    if not account_id:
+        return 0.0
+    prev = conn.execute(
+        """SELECT balance, observed_date FROM account_balance_history
+           WHERE account_id=? AND observed_date < ?
+           ORDER BY observed_date DESC, id DESC LIMIT 1""",
+        (account_id, since_date.isoformat())
+    ).fetchone()
+    if not prev:
+        return 0.0
+    # The feed window must cover the same span as the balance delta, which starts at
+    # the baseline READING, not at midnight today. Counting only today's transactions
+    # against a delta that also contains yesterday's leaves yesterday's activity
+    # looking unexplained. The baseline reading may already include a few transactions
+    # of its own day, so this can over-count the feed slightly — that direction only
+    # ever settles fewer bills, which is the safe way to be wrong.
+    # Bounded at today on purpose: USAA reports scheduled payments as future-dated
+    # rows (2026-08-28 in this account) and that money has not moved yet. Counting it
+    # here made the feed appear to explain $1,092.68 of a balance drop it had nothing
+    # to do with, cancelling out the real gap.
+    feed = conn.execute(
+        """SELECT COALESCE(SUM(amount), 0) AS s FROM transactions
+           WHERE account_id=? AND transaction_date >= ? AND transaction_date <= ?
+             AND (is_pending IS NULL OR is_pending=0)""",
+        (account_id, prev["observed_date"], since_date.isoformat())
+    ).fetchone()["s"]
+    residual = (get_account_balance(conn, account_id) - float(prev["balance"])) - float(feed or 0)
+    return round(-residual, 2) if residual < 0 else 0.0
 
 def get_setting(conn, key: str, default=None):
     row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
     return row["value"] if row else default
 
-def cash_flow_projection(conn, end_date, start_balance=None) -> list:
+def cash_flow_projection(conn, end_date, start_balance=None, diagnostics=None) -> list:
     """THE day-by-day projection of the Bills account, from today through
     end_date: every unpaid bill occurrence (all monthly occurrences in the
     window, not just the next one; weekly bills every week) and every projected
@@ -726,11 +900,14 @@ def cash_flow_projection(conn, end_date, start_balance=None) -> list:
     bills_acct_id = bills_acct["id"] if bills_acct else None
     if start_balance is None:
         start_balance = get_available_balance(conn, bills_acct_id) if bills_acct_id else 0.0
-    paid_lookup = {
-        (r["bill_id"], r["month"])
-        for r in conn.execute("SELECT bill_id, month FROM bill_paid_months").fetchall()
-    }
+    # Every month the projection can reach, so a bill already paid this month is not
+    # re-projected, and next month's occurrence still is.
+    _months = sorted({(today + timedelta(days=n)).strftime("%Y-%m") for n in (0, 31, 62, 93, 124, 155, 186)})
+    settled = paid_lookup(conn, _months)
     events = []
+    # Mutable box so the bill loop can draw the budget down as it consumes it.
+    unexplained = [unreported_debits(conn, bills_acct_id, today)]
+    settled_today = []
     for b in conn.execute("SELECT * FROM bills WHERE is_active=1").fetchall():
         amt = float(b["expected_amount"])
         if b["frequency"] == "weekly" and b["day_of_week"] is not None:
@@ -741,8 +918,19 @@ def cash_flow_projection(conn, end_date, start_balance=None) -> list:
             while date(y, m, 1) <= end_date:
                 last_day = cal_mod.monthrange(y, m)[1]
                 occ = date(y, m, min(b["day_of_month"], last_day))
-                if today <= occ <= end_date and (b["id"], occ.strftime("%Y-%m")) not in paid_lookup:
-                    events.append((occ, -amt, b["name"], "bill"))
+                if today <= occ <= end_date and (b["id"], occ.strftime("%Y-%m")) not in settled:
+                    # A bill due TODAY is the one occurrence where the balance and the
+                    # feed can disagree: autopay has taken the money, the balance shows
+                    # it, the transaction has not arrived. Subtracting it again is the
+                    # debit-side twin of the payday double-count. Only settle it against
+                    # money that demonstrably left the account and is not itemised, and
+                    # only up to that amount, so this can never reserve less than the
+                    # account can prove it has already spent.
+                    if occ == today and b["autopay"] and unexplained[0] >= amt:
+                        unexplained[0] = round(unexplained[0] - amt, 2)
+                        settled_today.append({"id": b["id"], "name": b["display_name"] or b["name"], "amount": amt})
+                    else:
+                        events.append((occ, -amt, b["name"], "bill"))
                 m += 1
                 if m > 12:
                     m = 1
@@ -785,6 +973,12 @@ def cash_flow_projection(conn, end_date, start_balance=None) -> list:
     # balance that already holds it counts the paycheck twice — $3,103.26 of real
     # money displayed as $4,680.07. The reported balance is the authority on what is
     # in the account; a flag on one imported row is not.
+    # Report what was settled rather than projected, so no page has to take it on
+    # trust. Optional out-param keeps the return type of this function unchanged for
+    # the Calendar and everything else that only wants the timeline.
+    if diagnostics is not None:
+        diagnostics["settled_today"] = settled_today
+        diagnostics["unexplained_remaining"] = unexplained[0]
     events.sort(key=lambda x: (x[0], 0 if x[3] == "income" else 1))
     running = start_balance
     timeline = []
@@ -1425,9 +1619,7 @@ async def dashboard():
     # Bills tab checkbox and Calendar toggle write to — never a separate guess based
     # on fuzzy-matching transaction descriptions, which could silently disagree with
     # what you already told the app on those other tabs.
-    paid_months_lookup = {
-        (r["bill_id"], r["month"]) for r in conn.execute("SELECT bill_id, month FROM bill_paid_months").fetchall()
-    }
+    paid_months_lookup = paid_lookup(conn, sorted({b["due_date"][:7] for b in upcoming_bills}) or None)
     for b in upcoming_bills:
         # Weekly bills (e.g. an accelerated card payoff) can recur several times a month
         # under one bill id — a single "paid" mark for the month shouldn't suppress every
@@ -1460,13 +1652,20 @@ async def dashboard():
     # fine. This is the same simulation used for overdraft_warnings below, so the
     # suggested transfer can never recommend moving out money that simulation
     # itself flags as needed to avoid an overdraft.
-    cash_flow_timeline = cash_flow_projection(conn, today + timedelta(days=60), start_balance=bills_balance)
+    _proj_diag = {}
+    cash_flow_timeline = cash_flow_projection(conn, today + timedelta(days=60), start_balance=bills_balance, diagnostics=_proj_diag)
     min_balance = bills_balance
     min_balance_date = today.isoformat()
+    # Safe-to-move is the MINIMUM of this 60-day run, so exactly one event decides it
+    # and every other bill is irrelevant to the figure on screen. Naming that event is
+    # the difference between a number that swings for no visible reason and one you can
+    # check by eye.
+    min_balance_label = None
     overdraft_warnings = []
     for _e in cash_flow_timeline:
         if _e["balance"] < min_balance:
             min_balance, min_balance_date = _e["balance"], _e["date"]
+            min_balance_label = _e["label"]
         if _e["kind"] == "bill" and _e["balance"] < safe_buffer:
             overdraft_warnings.append({
                 "bill_name": _e["label"],
@@ -1488,6 +1687,42 @@ async def dashboard():
     # Y pins at 0 and bills_shortfall says how far short you are.
     bills_needed = round(bills_balance - max(0.0, safe_today), 2)
     bills_shortfall = round(max(0.0, safe_buffer - min_balance), 2)
+
+    # Bills still being reserved even though a matching payment is already on the
+    # statement. Each one holds safe-to-move down by its full amount, and nothing on
+    # screen said so — on 2026-08-22 a duplicate loan bill and an already-paid electric
+    # bill together hid $1,052.62, which read as "in the hole" and corrected itself
+    # later the same day with no change to the household's actual position.
+    reserved_but_paid = []
+    _month = today.strftime("%Y-%m")
+    _scan = cash_flow_timeline if bills_account else []
+    _ticked = {r["bill_id"] for r in conn.execute(
+        "SELECT bill_id FROM bill_paid_months WHERE month=?", (_month,)).fetchall()}
+    for _e in _scan:
+        if _e["kind"] != "bill" or _e["date"][:7] != _month:
+            continue
+        _b = conn.execute(
+            "SELECT * FROM bills WHERE is_active=1 AND name=? LIMIT 1", (_e["label"],)).fetchone()
+        if not _b or _b["id"] in _ticked:
+            continue
+        _term = _bill_match_term(_b).lower().strip()
+        if len(_term) < 3:
+            continue
+        _t = conn.execute(
+            """SELECT transaction_date, amount FROM transactions
+               WHERE account_id=? AND amount < 0 AND transaction_date BETWEEN ? AND ?
+                 AND (is_transfer IS NULL OR is_transfer=0) AND (is_pending IS NULL OR is_pending=0)
+                 AND norm_desc(description) LIKE ? ORDER BY transaction_date DESC LIMIT 1""",
+            (bills_account["id"], _month + "-01", today.isoformat(), f"%{_term}%")).fetchone()
+        if _t:
+            reserved_but_paid.append({
+                "bill_id": _b["id"],
+                "name": _b["display_name"] or _b["name"],
+                "amount": abs(fmt_money(_e["amount"])),
+                "due_date": _e["date"],
+                "paid_date": _t["transaction_date"],
+                "paid_amount": abs(fmt_money(_t["amount"])),
+            })
 
     # "Amount needed to cover bills until next paycheck": sum bills due STRICTLY
     # BEFORE the next paycheck lands. Bills due ON payday are covered by that day's
@@ -1711,6 +1946,10 @@ async def dashboard():
         "bills_pending": bills_pending,
         "bills_needed": bills_needed,
         "bills_shortfall": bills_shortfall,
+        "bills_low_label": min_balance_label,
+        "bills_settled_today": _proj_diag.get("settled_today", []),
+        "bills_reserved_but_paid": reserved_but_paid,
+        "bills_reserved_but_paid_total": fmt_money(sum(x["amount"] for x in reserved_but_paid)),
         "bills_low_point": fmt_money(min_balance),
         "bills_low_date": min_balance_date,
         "bills_before_next_pay": fmt_money(bills_before_pay),
@@ -1785,9 +2024,7 @@ async def calendar_data(month: str = None):
            ORDER BY t.transaction_date""",
         (start.isoformat(), end.isoformat())
     ).fetchall()
-    paid_set = {r["bill_id"] for r in conn.execute(
-        "SELECT bill_id FROM bill_paid_months WHERE month=?", (month,)
-    ).fetchall()}
+    paid_set = {bid for bid, m in paid_lookup(conn, [month]) if m == month}
     bills = conn.execute("SELECT * FROM bills WHERE is_active=1").fetchall()
     bill_events = []
     for b in bills:
@@ -1945,13 +2182,13 @@ async def calendar_data(month: str = None):
             due = date(year, mon, b["day_of_month"])
         except ValueError:
             due = date(year, mon, cal_mod.monthrange(year, mon)[1])
-        term = _bill_match_term(b).lower()
+        term = _bill_match_term(b)
         # Amount must be in the right ballpark too — a $2.41 fee at the same
         # merchant is not the $25 bill payment.
         _tol = max(5.0, float(b["expected_amount"]) * 0.2)
         m_txn = conn.execute(
             """SELECT transaction_date, amount FROM transactions
-               WHERE amount < 0 AND LOWER(description) LIKE ?
+               WHERE amount < 0 AND norm_desc(description) LIKE ?
                  AND ABS(ABS(amount) - ?) <= ?
                  AND ABS(julianday(transaction_date) - julianday(?)) <= 5
                ORDER BY ABS(julianday(transaction_date) - julianday(?)) LIMIT 1""",
@@ -2084,9 +2321,8 @@ async def list_bills():
     rows = conn.execute("SELECT * FROM bills WHERE is_active=1 ORDER BY day_of_month IS NULL, day_of_month").fetchall()
     today = date.today()
     current_month = today.strftime("%Y-%m")
-    paid_ids = {r["bill_id"] for r in conn.execute(
-        "SELECT bill_id FROM bill_paid_months WHERE month=?", (current_month,)
-    ).fetchall()}
+    paid_ids = {bid for bid, m in paid_lookup(conn, [current_month]) if m == current_month}
+    auto_marks = auto_paid_lookup(conn, [current_month])
     result = []
     for b in rows:
         if b["frequency"] == "weekly" and b["day_of_week"] is not None:
@@ -2098,8 +2334,8 @@ async def list_bills():
         if b["confidence"] == "estimated" and b["account_id"]:
             three_months_ago = (today - timedelta(days=90)).isoformat()
             txns = conn.execute(
-                "SELECT amount FROM transactions WHERE account_id=? AND transaction_date >= ? AND LOWER(description) LIKE ? ORDER BY transaction_date DESC LIMIT 3",
-                (b["account_id"], three_months_ago, f"%{_bill_match_term(b).lower()}%")
+                "SELECT amount FROM transactions WHERE account_id=? AND transaction_date >= ? AND norm_desc(description) LIKE ? ORDER BY transaction_date DESC LIMIT 3",
+                (b["account_id"], three_months_ago, f"%{_bill_match_term(b)}%")
             ).fetchall()
             amounts = [abs(t["amount"]) for t in txns]
             if amounts:
@@ -2123,7 +2359,7 @@ async def list_bills():
             loan = conn.execute("SELECT name FROM loans WHERE id=?", (b["linked_loan_id"],)).fetchone()
             if loan:
                 linked_name = loan["name"]
-        result.append({**dict(b), "next_due": next_d.isoformat() if next_d else None, "days_until": days, "rolling_min": rolling_min, "rolling_max": rolling_max, "paid_this_month": b["id"] in paid_ids, "monthly_equivalent": monthly_equivalent, "linked_name": linked_name})
+        result.append({**dict(b), "next_due": next_d.isoformat() if next_d else None, "days_until": days, "rolling_min": rolling_min, "rolling_max": rolling_max, "paid_this_month": b["id"] in paid_ids, "paid_auto": (b["id"], current_month) in auto_marks, "monthly_equivalent": monthly_equivalent, "linked_name": linked_name})
     conn.close()
     return result
 
@@ -2150,9 +2386,15 @@ async def create_bill(request: Request):
 async def update_bill(bill_id: int, request: Request):
     body = await request.json()
     conn = get_db()
+    # Three columns here are never sent by the Bills edit modal, and nothing in the
+    # UI sets them through this endpoint at all: account_id comes from linking a
+    # merchant to the bill, bill_type from the required/optional PATCH below, and
+    # from_debt_budget from the Debt tab. Writing them straight from the body meant
+    # every ordinary edit — renaming a bill, nudging its due day — silently blanked
+    # all three. Absent means "leave it alone"; an explicit value still overwrites.
     conn.execute(
-        "UPDATE bills SET name=?, display_name=?, expected_amount=?, confidence=?, day_of_month=?, account_id=?, bill_type=?, payment_type=?, from_debt_budget=?, linked_loan_id=?, linked_account_id=?, notes=?, autopay=? WHERE id=?",
-        (body["name"], body.get("display_name") or None, body["expected_amount"], body.get("confidence", "fixed"), body.get("day_of_month"), body.get("account_id"), body.get("bill_type"), body.get("payment_type", "Recurring"), int(body.get("from_debt_budget") or 0), body.get("linked_loan_id"), body.get("linked_account_id"), body.get("notes"), int(body.get("autopay", 1)), bill_id)
+        "UPDATE bills SET name=?, display_name=?, expected_amount=?, confidence=?, day_of_month=?, account_id=COALESCE(?, account_id), bill_type=COALESCE(?, bill_type), payment_type=?, from_debt_budget=COALESCE(?, from_debt_budget), linked_loan_id=?, linked_account_id=?, notes=?, autopay=? WHERE id=?",
+        (body["name"], body.get("display_name") or None, body["expected_amount"], body.get("confidence", "fixed"), body.get("day_of_month"), body.get("account_id"), body.get("bill_type"), body.get("payment_type", "Recurring"), _opt_int(body.get("from_debt_budget")), body.get("linked_loan_id"), body.get("linked_account_id"), body.get("notes"), int(body.get("autopay", 1)), bill_id)
     )
     conn.commit()
     conn.close()
@@ -2177,12 +2419,14 @@ async def set_bill_paid(bill_id: int, request: Request):
     conn = get_db()
     if paid:
         conn.execute(
-            "INSERT OR REPLACE INTO bill_paid_months (bill_id, month, paid_date) VALUES (?,?,?)",
+            "INSERT OR REPLACE INTO bill_paid_months (bill_id, month, paid_date, state) VALUES (?,?,?,'paid')",
             (bill_id, month, paid_date),
         )
     else:
         conn.execute(
-            "DELETE FROM bill_paid_months WHERE bill_id=? AND month=?",
+            # Not a delete: auto-detection would just find the payment again. Unticking
+            # is a statement that the household disagrees, and has to be recorded as one.
+            "INSERT OR REPLACE INTO bill_paid_months (bill_id, month, paid_date, state) VALUES (?,?,NULL,'unpaid')",
             (bill_id, month),
         )
     conn.commit()
@@ -2219,7 +2463,7 @@ async def update_transaction_category(txn_id: int, request: Request):
                 (pattern, category, datetime.now().isoformat())
             )
             cur = conn.execute(
-                "UPDATE transactions SET category=?, category_confirmed=1 WHERE LOWER(description) LIKE ?",
+                "UPDATE transactions SET category=?, category_confirmed=1 WHERE norm_desc(description) LIKE ?",
                 (category, f"%{pattern}%")
             )
             updated = cur.rowcount
@@ -2491,6 +2735,21 @@ async def update_loan(loan_id: int, request: Request):
     conn.commit()
     conn.close()
     return {"updated": loan_id}
+
+@router.put("/api/loans/{loan_id}/name")
+async def update_loan_name(loan_id: int, request: Request):
+    """Rename a hand-tracked loan on its own, without the full-replace PUT above.
+    A bill linked to this loan displays the loan's name, so the Bills edit modal
+    renames through here rather than making you go find the Debt tab."""
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name required")
+    conn = get_db()
+    conn.execute("UPDATE loans SET name=? WHERE id=?", (name, loan_id))
+    conn.commit()
+    conn.close()
+    return {"updated": loan_id, "name": name}
 
 @router.delete("/api/loans/{loan_id}")
 async def delete_loan(loan_id: int):
@@ -2829,7 +3088,7 @@ async def link_transaction_to_bill(request: Request):
     """Connect a bank transaction to a bill — either an existing one (bill_id)
     or a new bill created from the transaction. Does three things at once:
     sets the bill's merchant_pattern (so history/creep/rolling stats match),
-    adds a merchant rule mapping the pattern to the 'bill' category (so future
+    adds a merchant rule mapping the pattern to the right category (so future
     syncs never count it as living spend), and recategorizes every existing
     matching transaction the same way."""
     body = await request.json()
@@ -2878,13 +3137,19 @@ async def link_transaction_to_bill(request: Request):
         "UPDATE bills SET merchant_pattern=?, account_id=COALESCE(account_id, ?) WHERE id=?",
         (pattern, txn["account_id"], bill_id)
     )
+    # A loan or credit-card payment is 'debt_payment' everywhere else in the app — the
+    # Debt tab, the category breakdown, years of existing history. Filing it under the
+    # generic 'bill' category splits one obligation across two categories on the Budget
+    # and Spending pages. Both are excluded from discretionary spend, so no total moves.
+    row = conn.execute("SELECT payment_type FROM bills WHERE id=?", (bill_id,)).fetchone()
+    category = "debt_payment" if row and row["payment_type"] in ("Debt", "Loan") else "bill"
     conn.execute(
-        "INSERT OR REPLACE INTO merchant_rules (pattern, category, created_at) VALUES (?, 'bill', ?)",
-        (pattern, datetime.now().isoformat())
+        "INSERT OR REPLACE INTO merchant_rules (pattern, category, created_at) VALUES (?, ?, ?)",
+        (pattern, category, datetime.now().isoformat())
     )
     recat = conn.execute(
-        "UPDATE transactions SET category='bill', category_confirmed=1 WHERE LOWER(description) LIKE ?",
-        (f"%{pattern}%",)
+        "UPDATE transactions SET category=?, category_confirmed=1 WHERE norm_desc(description) LIKE ?",
+        (category, f"%{pattern}%")
     )
     conn.commit()
     recategorized = recat.rowcount
@@ -2957,8 +3222,8 @@ async def bill_creep():
         if not b["account_id"] or b["frequency"] == "weekly" or float(b["expected_amount"]) <= 0:
             continue
         txns = conn.execute(
-            "SELECT amount, transaction_date FROM transactions WHERE account_id=? AND transaction_date >= ? AND amount < 0 AND LOWER(description) LIKE ? ORDER BY transaction_date DESC LIMIT 3",
-            (b["account_id"], since, f"%{_bill_match_term(b).lower()}%")
+            "SELECT amount, transaction_date FROM transactions WHERE account_id=? AND transaction_date >= ? AND amount < 0 AND norm_desc(description) LIKE ? ORDER BY transaction_date DESC LIMIT 3",
+            (b["account_id"], since, f"%{_bill_match_term(b)}%")
         ).fetchall()
         if not txns:
             continue
@@ -3003,7 +3268,7 @@ async def bills_reconcile(month: str = None):
     ).fetchall()
 
     def matches(b, desc):
-        term = _bill_match_term(b).lower().strip()
+        term = _bill_match_term(b)
         return len(term) >= 3 and term in desc
 
     bills_out = []
@@ -3074,10 +3339,11 @@ def compute_month_review(conn, month: str) -> dict:
     ).fetchone()
     obligations = float(obligations_row["total"])
     bills_paid_count = obligations_row["cnt"]
-    bills_unpaid_count = conn.execute(
-        "SELECT COUNT(*) FROM bills WHERE is_active=1 AND frequency='monthly' AND id NOT IN (SELECT bill_id FROM bill_paid_months WHERE month=?)",
-        (month,)
-    ).fetchone()[0]
+    _settled = {bid for bid, m in paid_lookup(conn, [month]) if m == month}
+    bills_unpaid_count = sum(
+        1 for r in conn.execute("SELECT id FROM bills WHERE is_active=1 AND frequency='monthly'").fetchall()
+        if r["id"] not in _settled
+    )
 
     discretionary = float(conn.execute(
         """SELECT COALESCE(ABS(SUM(amount)), 0) FROM transactions
@@ -3217,9 +3483,9 @@ async def spending_transactions(days: int = 30, account_id: int = None, limit: i
     if account_id:
         q += " AND t.account_id=?"; params.append(account_id)
     if merchant_key:
-        q += " AND LOWER(t.description) LIKE ?"; params.append(f"%{merchant_key.lower()}%")
+        q += " AND norm_desc(t.description) LIKE ?"; params.append(f"%{merchant_key.lower()}%")
     if search:
-        q += " AND LOWER(t.description) LIKE ?"; params.append(f"%{search.lower()}%")
+        q += " AND norm_desc(t.description) LIKE ?"; params.append(f"%{search.lower()}%")
     q += " ORDER BY t.transaction_date DESC LIMIT ?"; params.append(limit if not uncategorized else max(limit, 500))
     rows = conn.execute(q, params).fetchall()
     conn.close()
@@ -3262,8 +3528,8 @@ async def bill_history():
         if not b["account_id"]:
             continue
         txns = conn.execute(
-            "SELECT * FROM transactions WHERE account_id=? AND transaction_date >= ? AND LOWER(description) LIKE ? ORDER BY transaction_date DESC LIMIT 6",
-            (b["account_id"], since, f"%{_bill_match_term(b).lower()}%")
+            "SELECT * FROM transactions WHERE account_id=? AND transaction_date >= ? AND norm_desc(description) LIKE ? ORDER BY transaction_date DESC LIMIT 6",
+            (b["account_id"], since, f"%{_bill_match_term(b)}%")
         ).fetchall()
         result.append({"bill": dict(b), "history": [{"date": t["transaction_date"], "amount": abs(fmt_money(t["amount"]))} for t in txns]})
     conn.close()

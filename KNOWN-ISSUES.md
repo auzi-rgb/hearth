@@ -3,6 +3,25 @@
 Open bugs and planned fixes. Kept out of `README.md` (which describes current state only).
 When one is fixed, remove it here and note it in that session's `HEARTH-CHANGES-*.md`.
 
+## The big one
+- **The balance and the transaction feed describe different moments, every single day.**
+  Measured 2026-08-22 over 9 days of balance history on the Bills account: on no day did
+  the feed's transactions account for the balance movement. Gaps ran from $216 to $3,970,
+  cumulative |unreported| $10,990 over 9 days. SimpleFin updates the *balance* as soon as
+  the bank posts; the *transactions* trail it by 24-48h. Every calculation that starts
+  from `get_available_balance` and then decides "what has already happened?" from the
+  transactions table is comparing two different days, and the difference lands directly
+  in safe-to-move:
+    - **Payday**: deposit is in the balance, absent from the feed → projected again →
+      overstates. Reproduced at $2,640 on 2026-08-13. **Fixed** by `0003_account_balance_history`
+      (see below), which detects the deposit from the balance jump instead.
+    - **Bill payments**: money has left the balance, absent from the feed → bill still
+      projected as due → understates. On 2026-08-22 this hid $1,052.62 and read as "in
+      the hole". **Fixed** by `unreported_debits()`, which settles a bill due today
+      against the measured residual, capped by it.
+  Both halves are now closed. What remains is bill-list accuracy (below), which is what
+  determines whether the projection is asking the right questions in the first place.
+
 ## Data integrity
 - **Sync fuzzy dedup can drop real transactions** (`sync.py`) — a new transaction with the
   same account + amount within 1 day of an existing one (different description) is treated
@@ -18,9 +37,45 @@ When one is fixed, remove it here and note it in that session's `HEARTH-CHANGES-
 - **DB connections leak on error** — endpoints open a connection without try/finally, so a
   mid-request exception leaves it unclosed. Harmless single-user, but sloppy.
 
+## Bill-list accuracy — RESOLVED 2026-08-22 (see HEARTH-CHANGES). Remaining:
+- **Four bills still have no merchant_pattern and cannot be auto-settled**: the three
+  credit-card bills (Citi, Platinum Visa, Chase Freedom) all pay as `Credit Card Payment`
+  / `USAA CREDIT CARD PAYMENT` and cannot be told apart, and `Apple Bill` is charged to
+  the Citi card (account 10), not the Bills account — it is modelled in the wrong place.
+- **A $50/month Fidelity contribution is not modelled as a bill at all** (visible as
+  `FID BKG SVC LLC MONEYLINE` on ~the 18th, every month since March).
+- **The USAA loan has no July payment** under either the old `ICPAYMENT` descriptor or
+  the new `USAA UNSECURED FIXED RATE LOAN PAYMENT`. Worth checking with USAA.
+- **A bill's history still follows only one descriptor.** Now that patterns are set this
+  bites on rebrands: Happen Bank sees 2 of 18 payments, the USAA loan 1 of 13. An alias
+  list per bill would fix it.
+
+## Superseded survey (2026-08-22, applied)
+- **7 bills have a due day that disagrees with their own payment history** — Best Egg
+  25→24, Honda 16→15, Pedernales 22→21, Optimum 14→12, Atmos 21→22, Rent 3→1, TLE 16→17.
+  Each double-counts for exactly the days it is wrong by.
+- **Two groups of 4 duplicate bills** — "Capital One HYSA" and "Roth IRA", both modelled
+  as four monthly bills on days 1/7/14/21 at $25. Each is really one weekly contribution;
+  as monthly rows they understate the true monthly cost ($100 vs $108.33) and one payment
+  would mark all four paid under any auto-detection.
+- **Some bills cannot be told apart by description at all.** The two TLE Lake Georgetown
+  bills share `Tle at Lake Geor Payment`; the four Roth IRA bills and the 529 all share
+  `Fidelity Brokerage Services`; "Capital One" for the HYSA transfer also matches
+  `CAPITAL ONE AUTO DIRECTPAY` (the Hyundai loan). These need amount-based
+  disambiguation or must be accepted as un-matchable.
+- **`_bill_pattern_from_desc` generates unsafe patterns.** Asked for the 27 bills with no
+  pattern it proposed `'payment'` (matches 70 transactions), `'brokerage'`, `'energy'`,
+  `'mountain'`, and for Audible a one-off order id `'v13ev7b53'` (matches 1). It should
+  prefer the merchant token, and reject candidates that match implausibly many or few.
+
 ## Missing management
 - **No paycheck DELETE endpoint/UI** — a phantom auto-detected paycheck currently requires a
   SQL delete to remove.
+- **A bill's history only follows one merchant descriptor.** Each bill matches transactions
+  through a single `merchant_pattern` LIKE, so when an institution rebrands (LendingClub →
+  HappenBank) the payments before the change stop appearing in that bill's history, creep
+  and rolling stats. Bill 121 sees 2 of 18 payments. Would need a list of patterns per bill,
+  or an alias table.
 
 ## Security (low urgency — LAN-only deployment)
 - **No rate limit on `/api/auth/login`** (slowapi is only on `/api/ai/chat`).
@@ -54,9 +109,13 @@ When one is fixed, remove it here and note it in that session's `HEARTH-CHANGES-
 ## Data freshness
 - **Personal Loan (8337) (Happen Bank / LendingClub) is stale.** `balance_date` 2026-06-21;
   the $910.09 bill is still being paid from Bills each month, so the loan is live but its
-  balance hasn't moved in two months. Feeds net worth and the payoff plan. Check whether the
-  SimpleFin connection needs re-authorizing — and whether it is the same
-  reconnected-under-a-new-id case Chase turned out to be.
+  balance hasn't moved in two months. Feeds net worth and the payoff plan. **Investigated
+  2026-08-22: this is NOT the Chase reconnected-under-a-new-id case** — there is no inactive
+  duplicate row, and every other account refreshed 2026-08-21/22. `sync` writes
+  `institution`, `name`, `current_balance` and `balance_date` in a single statement, and the
+  stored institution already reads "Happen Bank (FMA: LendingClub)", so SimpleFin last
+  returned this account on 2026-06-21 and has not returned it since. **Needs re-authorizing
+  on the SimpleFin bridge** — there is no code or data fix from this side.
 - **A reconnected account goes inactive and nothing chases the warning.** When an
   institution is reconnected, SimpleFin issues a new account id; sync's name-clash guard
   inserts it INACTIVE (correctly, to avoid double-counting) and returns a warning that is

@@ -118,6 +118,18 @@ async def run_sync():
                 if not insert_active:
                     warnings.append(f"Account '{name}' imported inactive — a same-named active account already exists. Review in Accounts page.")
 
+            # Remember what the balance was, every run. The projection needs to know
+            # on payday whether the deposit has landed, and the transaction feed
+            # answers that up to two days late — the balance answers it immediately,
+            # but only if there is something to compare today's figure against.
+            if current_balance is not None:
+                conn.execute(
+                    """INSERT INTO account_balance_history
+                       (account_id, balance, balance_date, observed_at, observed_date)
+                       VALUES (?,?,?,?,?)""",
+                    (acct_id, current_balance, balance_date, now, now[:10])
+                )
+
             # Process transactions
             for txn in sf_acct.get("transactions", []):
                 txn_date = date.fromtimestamp(txn.get("transacted_at") or txn.get("posted", 0)).isoformat()
@@ -487,7 +499,7 @@ def _coach_context(conn) -> dict:
 async def generate_coach_briefing() -> dict:
     conn = get_db()
     enabled = (get_setting(conn, "ai_coach_enabled", "true") or "true").lower() != "false"
-    model = get_setting(conn, "ai_coach_model", "qwen2.5:14b") or "qwen2.5:14b"
+    model = get_setting(conn, "ai_coach_model", "qwen2.5:7b") or "qwen2.5:7b"
     if not enabled:
         conn.close()
         return {"status": "disabled"}

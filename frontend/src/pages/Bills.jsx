@@ -58,7 +58,9 @@ function BillModal({ bill, loans, debtAccounts, allBills, onClose, onSaved }) {
   const isEdit = !!bill
   const [form, setForm] = useState({
     name:            bill?.name                      ?? '',
-    display_name:    bill?.display_name              ?? '',
+    // A linked bill displays its debt account's/loan's name, so that — not the
+    // bill's own display_name — is what the field must start from and rename.
+    display_name:    bill?.linked_name ?? bill?.display_name ?? '',
     payment_type:    bill?.payment_type              ?? 'Recurring',
     expected_amount: bill?.expected_amount != null   ? String(bill.expected_amount) : '',
     day_of_month:    bill?.day_of_month    != null   ? String(bill.day_of_month)    : '',
@@ -134,6 +136,21 @@ function BillModal({ bill, loans, debtAccounts, allBills, onClose, onSaved }) {
         linked_loan_id:    (finalPaymentType === 'Loan' || finalPaymentType === 'Debt') ? (form.linked_loan_id || null) : null,
         linked_account_id: (finalPaymentType === 'Loan' || finalPaymentType === 'Debt') ? (form.linked_account_id || null) : null,
       }
+      // Renaming a linked bill has to land on the debt account/loan, because that is
+      // the single source the Bills, Spending and About pages read the name from —
+      // writing only the bill's display_name would look like it did nothing. Doing it
+      // here means renaming never requires deleting and recreating the bill, which
+      // would strand its id, its transaction history and its paid months.
+      const newName = form.display_name.trim()
+      if (isEdit && bill?.linked_name && newName && newName !== bill.linked_name) {
+        const [renameUrl, renameBody] = bill.linked_account_id
+          ? [`${API}/accounts/${bill.linked_account_id}/nickname`, { nickname: newName }]
+          : [`${API}/loans/${bill.linked_loan_id}/name`,           { name: newName }]
+        const rn = await fetch(renameUrl, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(renameBody),
+        })
+        if (!rn.ok) throw new Error('Rename failed')
+      }
       const url    = isEdit ? `${API}/bills/${bill.id}` : `${API}/bills`
       const method = isEdit ? 'PUT' : 'POST'
       const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -171,19 +188,14 @@ function BillModal({ bill, loans, debtAccounts, allBills, onClose, onSaved }) {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div>
             <div className="apple-label" style={{ marginBottom: 5 }}>Display Name</div>
-            {bill?.linked_name ? (
-              <>
-                <div className="apple-input" style={{ width: '100%', color: 'var(--text-tertiary)', cursor: 'not-allowed' }}>
-                  {bill.linked_name}
-                </div>
-                <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 4 }}>
-                  This bill is linked to a debt account — rename it from the Debt tab and it'll update here too.
-                </div>
-              </>
-            ) : (
-              <input className="apple-input" value={form.display_name}
-                onChange={e => setField('display_name', e.target.value)}
-                placeholder="e.g. Netflix, Best Egg Loan" style={{ width: '100%' }} />
+            <input className="apple-input" value={form.display_name}
+              onChange={e => setField('display_name', e.target.value)}
+              placeholder="e.g. Netflix, Best Egg Loan" style={{ width: '100%' }} />
+            {bill?.linked_name && (
+              <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 4 }}>
+                Renames the linked {bill.linked_account_id ? 'debt account' : 'loan'} too, so the Debt tab
+                stays in step. The bill keeps its id, history and paid months.
+              </div>
             )}
           </div>
           <div>
@@ -637,7 +649,16 @@ export default function Bills({ active }) {
                         ✓{recBill[bill.id].drift ? '*' : ''}
                       </span>
                     ) : bill.paid_this_month ? (
-                      <span style={{ fontSize: 13, color: 'var(--accent-text)', fontWeight: 700 }}>✓</span>
+                      // A tick the household did not have to make: the payment is on the
+                      // statement, so the bill is settled without anyone checking it off.
+                      // Marked distinctly, because an inferred tick should be visible as one.
+                      <span title={bill.paid_auto
+                        ? 'Marked paid automatically — a matching payment is on the statement. Untick to overrule.'
+                        : 'You marked this paid.'}
+                        style={{ fontSize: 13, fontWeight: 700, cursor: 'help',
+                          color: bill.paid_auto ? 'var(--blue)' : 'var(--accent-text)' }}>
+                        ✓{bill.paid_auto ? '\u1D2C' : ''}
+                      </span>
                     ) : null}
                   </div>
 
