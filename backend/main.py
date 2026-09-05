@@ -905,36 +905,59 @@ def cash_flow_projection(conn, end_date, start_balance=None, diagnostics=None) -
     _months = sorted({(today + timedelta(days=n)).strftime("%Y-%m") for n in (0, 31, 62, 93, 124, 155, 186)})
     settled = paid_lookup(conn, _months)
     events = []
-    # Mutable box so the bill loop can draw the budget down as it consumes it.
+    # Mutable box so the group-settlement step below can draw it down.
     unexplained = [unreported_debits(conn, bills_acct_id, today)]
     settled_today = []
+    # Occurrences landing exactly today are held out of `events` for a moment —
+    # whether they get settled against `unexplained` is decided as one group below,
+    # not bill-by-bill, so weekly and monthly bills go through the same gate.
+    today_candidates = []
     for b in conn.execute("SELECT * FROM bills WHERE is_active=1").fetchall():
         amt = float(b["expected_amount"])
         if b["frequency"] == "weekly" and b["day_of_week"] is not None:
             for occ in weekly_occurrences(b["day_of_week"], today, end_date):
-                events.append((occ, -amt, b["name"], "bill"))
+                if occ == today:
+                    today_candidates.append((b, amt))
+                else:
+                    events.append((occ, -amt, b["name"], "bill"))
         elif b["day_of_month"]:
             y, m = today.year, today.month
             while date(y, m, 1) <= end_date:
                 last_day = cal_mod.monthrange(y, m)[1]
                 occ = date(y, m, min(b["day_of_month"], last_day))
                 if today <= occ <= end_date and (b["id"], occ.strftime("%Y-%m")) not in settled:
-                    # A bill due TODAY is the one occurrence where the balance and the
-                    # feed can disagree: autopay has taken the money, the balance shows
-                    # it, the transaction has not arrived. Subtracting it again is the
-                    # debit-side twin of the payday double-count. Only settle it against
-                    # money that demonstrably left the account and is not itemised, and
-                    # only up to that amount, so this can never reserve less than the
-                    # account can prove it has already spent.
-                    if occ == today and b["autopay"] and unexplained[0] >= amt:
-                        unexplained[0] = round(unexplained[0] - amt, 2)
-                        settled_today.append({"id": b["id"], "name": b["display_name"] or b["name"], "amount": amt})
+                    if occ == today:
+                        today_candidates.append((b, amt))
                     else:
                         events.append((occ, -amt, b["name"], "bill"))
                 m += 1
                 if m > 12:
                     m = 1
                     y += 1
+    # A bill due TODAY is the one occurrence where the balance and the feed can
+    # disagree: autopay has taken the money, the balance shows it, the transaction
+    # has not arrived. Subtracting it again is the debit-side twin of the payday
+    # double-count. Settle every autopay bill due today as ONE group, or none of
+    # them — the `bills` query above has no ORDER BY, so settling bill-by-bill let
+    # whichever bill happened to be returned first claim the residual, arbitrarily,
+    # when two autopay bills land the same day and the residual only covers one (or
+    # covers both but not in iteration order). Requiring the full group's total
+    # means this still can never reserve less than the account can prove it has
+    # already spent, and never guesses which specific bill a partial residual
+    # belongs to. Non-autopay bills due today are never eligible — nothing paid
+    # itself automatically, so they always still get projected.
+    autopay_today = [(b, amt) for b, amt in today_candidates if b["autopay"]]
+    total_autopay_due = round(sum(amt for _, amt in autopay_today), 2)
+    if autopay_today and unexplained[0] >= total_autopay_due:
+        unexplained[0] = round(unexplained[0] - total_autopay_due, 2)
+        for b, amt in autopay_today:
+            settled_today.append({"id": b["id"], "name": b["display_name"] or b["name"], "amount": amt})
+    else:
+        for b, amt in autopay_today:
+            events.append((today, -amt, b["name"], "bill"))
+    for b, amt in today_candidates:
+        if not b["autopay"]:
+            events.append((today, -amt, b["name"], "bill"))
     # A paycheck dated TODAY is projected only if it has not actually shown up
     # yet. The old rule ("never project today's paycheck") assumed SimpleFin's
     # balance runs AHEAD of the transaction feed; in practice it runs up to a day
