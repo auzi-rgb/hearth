@@ -164,6 +164,12 @@ html, body, #root {
   .apple-input::placeholder { color: var(--text-tertiary); }
 
   .apple-select {
+    /* Belt-and-suspenders alongside :root's color-scheme: some Chrome/Windows
+       builds don't reliably resolve the native <select> popup's light/dark
+       baseline from an inherited :root value (confirmed Chrome-specific — the
+       exact same CSS renders the popup correctly in Firefox) — stating it
+       directly on the element is more likely to be picked up. */
+    color-scheme: light dark;
     background: var(--bg-subtle);
     color: var(--text-primary);
     border: 1.5px solid transparent;
