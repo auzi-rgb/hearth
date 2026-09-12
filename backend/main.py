@@ -3955,7 +3955,12 @@ async def ai_context(days: int = 90, txn_limit: int = 150):
     bills = conn.execute(
         "SELECT name, expected_amount, day_of_month, bill_type FROM bills WHERE is_active=1"
     ).fetchall()
-    loans = conn.execute("SELECT name, current_balance, interest_rate FROM loans").fetchall()
+    # Every active debt — credit cards AND loans, with real rate/minimum-payment
+    # data — not just the standalone `loans` table. That table alone omits every
+    # credit card's interest_rate and minimum_payment entirely, so the AI had no
+    # real numbers for cards to reason with and fabricated plausible-looking ones
+    # instead. Same helper /api/debt/strategies already uses — one source of truth.
+    debts = _collect_debts(conn)
 
     # Pre-calculate spendable balance so the AI doesn't have to derive it from raw numbers
     checking_balance = sum(
@@ -3981,7 +3986,7 @@ async def ai_context(days: int = 90, txn_limit: int = 150):
         "safe_to_spend_note": f"checking/savings total ${checking_balance:.2f} minus ${bills_before_pay:.2f} in bills due before next paycheck minus ${safe_buffer:.2f} buffer",
         "transactions": [dict(t) for t in txns],
         "bills": [dict(b) for b in bills],
-        "debt": [dict(l) for l in loans],
+        "debt": debts,
         "generated_at": today.isoformat(),
     }
 

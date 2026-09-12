@@ -12,6 +12,14 @@ const PERSONA_PRESETS = {
   analyst: 'You are a data-driven financial analyst. Be precise with numbers. Avoid conversational filler — just facts, figures, and clear analysis. Format money as dollar amounts.',
 }
 
+// Appended to every persona (including a custom one typed into the textarea) rather
+// than baked into each preset — a model with no formatting instruction defaults to
+// heading/bold/bullet-heavy output ("### Option 1", "**Why:**"), which read like a
+// filed report instead of a person answering a question. One shared instruction
+// here means it applies no matter which persona is picked, and doesn't need to be
+// remembered every time a preset (or the custom prompt) is edited.
+const FORMATTING_GUIDANCE = "Reply in plain conversational prose, the way you'd text a knowledgeable friend — not a report. Don't use markdown headers, bold text, or bullet/numbered lists unless the user explicitly asks for a list or a breakdown of options."
+
 const LS_CTX_KEY = 'hearth_ai_context_sections'
 const LS_SAVED_PROMPTS = 'hearth_ai_saved_prompts'
 const LS_BUDGET_PREFIX = 'hearth_budget_limit_'
@@ -630,7 +638,7 @@ ${conversationText}`
     let memory = { facts: [], recent_sessions: [] }
     try { memory = await fetch(`${API}/ai/memory`).then(r => r.json()) } catch {}
 
-    let sys = systemPrompt
+    let sys = systemPrompt + '\n\n' + FORMATTING_GUIDANCE
 
     if (memory.facts.length > 0) {
       const factLines = memory.facts.map(f => `- ${f.fact}`).join('\n')
