@@ -341,6 +341,56 @@ function TableHeader() {
   )
 }
 
+// Calendar-week buckets for the By Week view. Weekly bills (no day_of_month —
+// they recur every week, not on one date) get their own trailing section below
+// instead of being forced into one of these, per the approved mockup.
+const WEEK_BUCKETS = [
+  { label: 'Week 1', sub: '1st – 7th',   test: d => d <= 7 },
+  { label: 'Week 2', sub: '8th – 14th',  test: d => d >= 8  && d <= 14 },
+  { label: 'Week 3', sub: '15th – 21st', test: d => d >= 15 && d <= 21 },
+  { label: 'Week 4', sub: '22nd – end',  test: d => d >= 22 },
+]
+
+// One row in the By Week view — deliberately lighter than the By Type table
+// (a color dot instead of the full Type badge, no confidence/notes/edit/delete
+// columns): this is an at-a-glance companion view, not a replacement — By Type
+// still has every control. Clicking a row opens the same edit modal as the
+// ✎ button does there.
+function WeekRow({ bill, onEdit }) {
+  const cfg = TYPE_BADGE[bill.payment_type || 'Recurring'] || TYPE_BADGE.Recurring
+  return (
+    <div onClick={() => onEdit(bill)}
+      style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10,
+        padding: '9px 4px', borderBottom: '1px solid var(--border)', cursor: 'pointer' }}
+      onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-subtle)'}
+      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+      <span style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: 14, fontWeight: 500,
+        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <span style={{ width: 8, height: 8, borderRadius: '50%', background: cfg.bg, flexShrink: 0 }} />
+        {bill.linked_name || bill.display_name || bill.name}
+        {bill.frequency === 'weekly' && (
+          <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-tertiary)' }}>
+            · {['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][bill.day_of_week] ?? '—'}
+          </span>
+        )}
+      </span>
+      <span style={{ fontSize: 14, fontWeight: 600, fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}>
+        {money(bill.expected_amount)}{bill.frequency === 'weekly' && <span style={{ fontSize: 11, color: 'var(--text-tertiary)', fontWeight: 400 }}>/wk</span>}
+      </span>
+    </div>
+  )
+}
+
+function WeekTotalRow({ label, total, suffix }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 4px',
+      fontSize: 13, fontWeight: 700, background: 'var(--bg-subtle)', borderRadius: 8, marginTop: 2 }}>
+      <span>{label}</span>
+      <span style={{ fontVariantNumeric: 'tabular-nums' }}>{money(total)}{suffix}</span>
+    </div>
+  )
+}
+
 export default function Bills({ active }) {
   const [bills, setBills]     = useState(null)
   const [loans, setLoans]     = useState([])
@@ -353,6 +403,7 @@ export default function Bills({ active }) {
   const [squeeze, setSqueeze] = useState(null)
   const [reconcile, setReconcile] = useState(null)
   const [reconBusy, setReconBusy] = useState(null)  // txn id currently being acted on
+  const [viewMode, setViewMode] = useState('type')  // 'type' | 'week'
 
   const load = useCallback(() => {
     fetch(`${API}/bills`).then(r => r.json()).then(setBills).catch(() => {})
@@ -429,9 +480,23 @@ export default function Bills({ active }) {
             All recurring obligations — sorted by due date
           </div>
         </div>
-        <button className="apple-btn-primary" onClick={() => setEditBill(null)} style={{ marginTop: 4 }}>
-          + Add Bill
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 4 }}>
+          <div style={{ display: 'inline-flex', background: 'var(--bg-subtle)', borderRadius: 'var(--radius-pill)', padding: 3 }}>
+            {[['type', 'By Type'], ['week', 'By Week']].map(([key, label]) => (
+              <button key={key} onClick={() => setViewMode(key)}
+                style={{ border: 'none', font: 'inherit', fontSize: 13, fontWeight: 500,
+                  padding: '6px 16px', borderRadius: 'var(--radius-pill)', cursor: 'pointer',
+                  background: viewMode === key ? 'var(--bg-card)' : 'none',
+                  color: viewMode === key ? 'var(--text-primary)' : 'var(--text-secondary)',
+                  boxShadow: viewMode === key ? 'var(--shadow-card)' : 'none' }}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <button className="apple-btn-primary" onClick={() => setEditBill(null)}>
+            + Add Bill
+          </button>
+        </div>
       </div>
 
       {/* Total card */}
@@ -586,7 +651,7 @@ export default function Bills({ active }) {
           <div style={{ padding: '40px 0', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 13 }}>
             No bills yet — click <strong>+ Add Bill</strong> to get started.
           </div>
-        ) : (
+        ) : viewMode === 'type' ? (
           <div style={{ minWidth: 620 }}>
             {BILL_GROUPS.map(group => {
             const rows = sorted.filter(b => group.types.includes(b.payment_type || 'Recurring'))
@@ -746,6 +811,44 @@ export default function Bills({ active }) {
               </div>
             )
             })}
+          </div>
+        ) : (
+          // By Week — the exact same bills, same day-of-month order, just grouped by
+          // calendar week instead of by type (bills and debt payoff sit together).
+          // A color dot keeps the type visible without the heavier badge/columns —
+          // this view is an at-a-glance companion; By Type still has every control.
+          <div>
+            {WEEK_BUCKETS.map(wk => {
+              const rows = sorted.filter(b => b.frequency !== 'weekly' && wk.test(b.day_of_month))
+              if (rows.length === 0) return null
+              const subtotal = rows.reduce((s, b) => s + (b.expected_amount ?? 0), 0)
+              return (
+                <div key={wk.label} style={{ marginBottom: 4 }}>
+                  <div style={{ display: 'flex', alignItems: 'baseline', padding: '14px 4px 6px' }}>
+                    <span style={{ fontSize: 12, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+                      {wk.label}
+                      <span style={{ fontWeight: 400, color: 'var(--text-tertiary)', textTransform: 'none', letterSpacing: 0, marginLeft: 8 }}>{wk.sub}</span>
+                    </span>
+                  </div>
+                  {rows.map(bill => <WeekRow key={bill.id} bill={bill} onEdit={setEditBill} />)}
+                  <WeekTotalRow label={`${wk.label} total`} total={subtotal} suffix="" />
+                </div>
+              )
+            })}
+            {sorted.some(b => b.frequency === 'weekly') && (
+              <div style={{ marginBottom: 4 }}>
+                <div style={{ display: 'flex', alignItems: 'baseline', padding: '14px 4px 6px' }}>
+                  <span style={{ fontSize: 12, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+                    Weekly
+                    <span style={{ fontWeight: 400, color: 'var(--text-tertiary)', textTransform: 'none', letterSpacing: 0, marginLeft: 8 }}>recurs every week, not tied to one date</span>
+                  </span>
+                </div>
+                {sorted.filter(b => b.frequency === 'weekly').map(bill => <WeekRow key={bill.id} bill={bill} onEdit={setEditBill} />)}
+                <WeekTotalRow label="Weekly total"
+                  total={sorted.filter(b => b.frequency === 'weekly').reduce((s, b) => s + (b.expected_amount ?? 0), 0)}
+                  suffix="/wk" />
+              </div>
+            )}
           </div>
         )}
       </div>
