@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { PieChart, Pie, Cell } from 'recharts'
 import Portal from '../components/Portal'
+import Dropdown from '../components/Dropdown'
 
 const API = '/hearth/api'
 
@@ -124,14 +125,12 @@ function BillLinkPanel({ txn, bills, onDone, onClose }) {
       </div>
       {mode === 'existing' ? (
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-          <select className="apple-select" value={billId} onChange={e => setBillId(e.target.value)} style={{ fontSize: 12, flex: 1, minWidth: 180 }}>
-            <option value="">— pick the bill this pays —</option>
-            {bills.map(b => (
-              <option key={b.id} value={b.id}>
-                {(b.linked_name || b.display_name || b.name).slice(0, 40)} · ${Number(b.expected_amount).toFixed(0)}
-              </option>
-            ))}
-          </select>
+          <Dropdown value={billId} onChange={setBillId} style={{ fontSize: 12, flex: 1, minWidth: 180 }}
+            placeholder="— pick the bill this pays —"
+            options={bills.map(b => ({
+              value: String(b.id),
+              label: `${(b.linked_name || b.display_name || b.name).slice(0, 40)} · $${Number(b.expected_amount).toFixed(0)}`,
+            }))} />
           <button className="apple-btn-primary" onClick={submit} disabled={saving || !billId} style={{ fontSize: 12 }}>
             {saving ? '…' : 'Link'}
           </button>
@@ -140,10 +139,11 @@ function BillLinkPanel({ txn, bills, onDone, onClose }) {
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <input className="apple-input" placeholder="Bill name" value={name}
             onChange={e => setName(e.target.value)} style={{ fontSize: 12, flex: 1, minWidth: 140 }} />
-          <select className="apple-select" value={payType} onChange={e => setPayType(e.target.value)} style={{ fontSize: 12 }}>
-            <option value="Recurring">Monthly Bill</option>
-            <option value="Contribution">Contribution</option>
-          </select>
+          <Dropdown value={payType} onChange={setPayType} style={{ fontSize: 12 }}
+            options={[
+              { value: 'Recurring', label: 'Monthly Bill' },
+              { value: 'Contribution', label: 'Contribution' },
+            ]} />
           <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
             ${Math.abs(txn.amount).toFixed(2)} on day {new Date(txn.transaction_date + 'T12:00:00').getDate()}
           </span>
@@ -337,10 +337,11 @@ function EditCategoriesPanel({ anchor, primaries, onClose, onRefresh }) {
         <div style={{ marginTop: 20, borderTop: '1px solid var(--border)', paddingTop: 16 }}>
           <div className="apple-label" style={{ marginBottom: 8 }}>Add new category</div>
           <div style={{ display: 'flex', gap: 8 }}>
-            <select className="apple-select" value={newParent} onChange={e => setNewParent(e.target.value)} style={{ fontSize: 13, width: 150, flexShrink: 0 }}>
-              <option value="">New primary card</option>
-              {primaries.map(p => <option key={p.name} value={p.name}>Under {p.name.replace(/_/g, ' ')}</option>)}
-            </select>
+            <Dropdown value={newParent} onChange={setNewParent} style={{ fontSize: 13, width: 150, flexShrink: 0 }}
+              options={[
+                { value: '', label: 'New primary card' },
+                ...primaries.map(p => ({ value: p.name, label: `Under ${p.name.replace(/_/g, ' ')}` })),
+              ]} />
             <input className="apple-input" value={newName} onChange={e => setNewName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addCat()} placeholder="e.g. medical" style={{ flex: 1, fontSize: 13 }} />
             <button className="apple-btn-primary" onClick={addCat} disabled={saving || !newName.trim()} style={{ fontSize: 13, padding: '6px 14px' }}>{saving ? '…' : 'Add'}</button>
           </div>
@@ -803,10 +804,11 @@ export default function Spending({ active }) {
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <button className="apple-btn-secondary" title="Create or delete spending categories" onClick={e => setEditCatsAnchor(e.currentTarget.getBoundingClientRect())} style={{ fontSize: 13 }}>Edit Categories</button>
           <button className="apple-btn-secondary" title="Set monthly budget targets per category" onClick={e => setBudgetAnchor(e.currentTarget.getBoundingClientRect())} style={{ fontSize: 13 }}>Budgets</button>
-          <select className="apple-select" value={accountId} onChange={e => setAccountId(e.target.value)} style={{ width: 150 }}>
-            <option value="">All accounts</option>
-            {accounts.map(a => <option key={a.id} value={String(a.id)}>{a.name}</option>)}
-          </select>
+          <Dropdown value={accountId} onChange={setAccountId} style={{ width: 150 }}
+            options={[
+              { value: '', label: 'All accounts' },
+              ...accounts.map(a => ({ value: String(a.id), label: a.name })),
+            ]} />
           <div style={{ display: 'flex', gap: 3, background: 'var(--bg-subtle)', borderRadius: 'var(--radius-pill)', padding: 3 }}>
             {RANGE_OPTIONS.map(o => (
               <button key={o.days} title={o.title} onClick={() => setDays(o.days)} style={{

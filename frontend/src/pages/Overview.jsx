@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import Portal from '../components/Portal'
+import Dropdown from '../components/Dropdown'
 
 function useIsWide(breakpoint = 1100) {
   const [wide, setWide] = useState(() => window.innerWidth >= breakpoint)
@@ -93,13 +94,14 @@ function LoanModal({ loan, onClose, onSaved }) {
           <div style={ROW}>
             <div>
               <div className="apple-label" style={{ marginBottom: 5 }}>Loan Type</div>
-              <select className="apple-select" value={form.type} onChange={e => f('type', e.target.value)} style={{ width: '100%' }}>
-                <option value="auto">Auto</option>
-                <option value="personal_loan">Personal</option>
-                <option value="mortgage">Mortgage</option>
-                <option value="student">Student</option>
-                <option value="other">Other</option>
-              </select>
+              <Dropdown value={form.type} onChange={v => f('type', v)} style={{ width: '100%' }}
+                options={[
+                  { value: 'auto', label: 'Auto' },
+                  { value: 'personal_loan', label: 'Personal' },
+                  { value: 'mortgage', label: 'Mortgage' },
+                  { value: 'student', label: 'Student' },
+                  { value: 'other', label: 'Other' },
+                ]} />
             </div>
             <div>
               <div className="apple-label" style={{ marginBottom: 5 }}>Start Date</div>

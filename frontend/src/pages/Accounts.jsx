@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import Portal from '../components/Portal'
+import Dropdown from '../components/Dropdown'
 
 const API = '/hearth/api'
 
@@ -111,9 +112,8 @@ function AddAccountModal({ anchor, onClose, onSave }) {
           </div>
           <div>
             <div className="apple-label" style={{ marginBottom: 4 }}>Type</div>
-            <select className="apple-select" value={form.type} onChange={e => f('type', e.target.value)} style={{ width: '100%' }}>
-              {TYPES.map(t => <option key={t} value={t}>{t.replace('_', ' ')}</option>)}
-            </select>
+            <Dropdown value={form.type} onChange={v => f('type', v)} style={{ width: '100%' }}
+              options={TYPES.map(t => ({ value: t, label: t.replace('_', ' ') }))} />
           </div>
           <div style={{ gridColumn: 'span 2' }}>
             <div className="apple-label" style={{ marginBottom: 4 }}>Current Balance</div>
@@ -220,19 +220,16 @@ const roleEligible = a => a.is_active && (a.type === 'checking' || a.type === 's
 function RoleSelect({ a, role, setAccountRole }) {
   if (!roleEligible(a)) return <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>—</span>
   return (
-    <select
-      className="apple-select"
+    <Dropdown
       value={role}
-      onChange={e => setAccountRole(a.id, e.target.value)}
-      title="Dashboard role: which account pays bills / holds day-to-day spending"
+      onChange={v => setAccountRole(a.id, v)}
+      options={ROLE_OPTIONS}
       style={{
         fontSize: 12, padding: '3px 6px',
         color: role ? 'var(--accent-text)' : 'var(--text-tertiary)',
         fontWeight: role ? 600 : 400,
       }}
-    >
-      {ROLE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-    </select>
+    />
   )
 }
 
@@ -258,9 +255,8 @@ function AccountCard({ a, isDupe, updateField, deactivate, reactivate, role, set
         </div>
       </div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginBottom: 10 }}>
-        <select className="apple-select" value={a.type} onChange={e => updateField(a.id, 'type', e.target.value)} style={{ fontSize: 12, flex: 1, minWidth: 0 }}>
-          {TYPES.map(t => <option key={t} value={t}>{t.replace('_', ' ')}</option>)}
-        </select>
+        <Dropdown value={a.type} onChange={v => updateField(a.id, 'type', v)} style={{ fontSize: 12, flex: 1, minWidth: 0 }}
+          options={TYPES.map(t => ({ value: t, label: t.replace('_', ' ') }))} />
         {roleEligible(a) && <RoleSelect a={a} role={role} setAccountRole={setAccountRole} />}
         <span style={{ fontSize: 11, color: 'var(--text-tertiary)', flexShrink: 0 }}>
           {a.simplefin_id ? 'SimpleFin' : 'Manual'}
@@ -355,9 +351,8 @@ function AccountSection({ label, accounts, duplicateIds, updateField, deactivate
                   </div>
                 </div>
                 <EditableText value={a.institution} onSave={v => updateField(a.id, 'institution', v)} placeholder="add institution" />
-                <select className="apple-select" value={a.type} onChange={e => updateField(a.id, 'type', e.target.value)} style={{ fontSize: 12 }}>
-                  {TYPES.map(t => <option key={t} value={t}>{t.replace('_', ' ')}</option>)}
-                </select>
+                <Dropdown value={a.type} onChange={v => updateField(a.id, 'type', v)} style={{ fontSize: 12 }}
+                  options={TYPES.map(t => ({ value: t, label: t.replace('_', ' ') }))} />
                 <div style={{ fontSize: 13, fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: a.balance < 0 ? 'var(--red)' : 'var(--accent-text)' }}>
                   {money(a.balance)}
                 </div>
@@ -556,11 +551,12 @@ export default function Accounts({ active }) {
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 14 }}>
           <div>
             <div className="apple-label" style={{ marginBottom: 6 }}>Account</div>
-            <select className="apple-select" value={csvAccountId}
-              onChange={e => { setCsvAccountId(e.target.value); setCsvResult(null); setCsvError(null) }}>
-              <option value="">— select account —</option>
-              {accounts.filter(a => a.is_active).map(a => <option key={a.id} value={a.id}>{a.display_name || a.name}</option>)}
-            </select>
+            <Dropdown value={csvAccountId}
+              onChange={v => { setCsvAccountId(v); setCsvResult(null); setCsvError(null) }}
+              options={[
+                { value: '', label: '— select account —' },
+                ...accounts.filter(a => a.is_active).map(a => ({ value: String(a.id), label: a.display_name || a.name })),
+              ]} />
           </div>
           <div>
             <div className="apple-label" style={{ marginBottom: 6 }}>CSV File</div>

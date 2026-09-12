@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import Dropdown from '../components/Dropdown'
 
 const API = '/hearth/api'
 
@@ -591,10 +592,11 @@ export default function Settings({ active, onCrumb }) {
           {/* Model */}
           <Field label="Default Model" hint="Used by the Assistant tab and AI category suggestions.">
             <div style={{ display: 'flex', gap: 10 }}>
-              <select className="apple-select" value={aiModel} onChange={e => setAiModel(e.target.value)} style={{ flex: 1 }}>
-                {aiModels.length === 0 && <option value={aiModel}>{aiModel || 'Loading models…'}</option>}
-                {aiModels.map(m => <option key={m.name} value={m.name}>{m.name}</option>)}
-              </select>
+              <Dropdown value={aiModel} onChange={setAiModel} style={{ flex: 1 }}
+                placeholder="Loading models…"
+                options={aiModels.length === 0
+                  ? (aiModel ? [{ value: aiModel, label: aiModel }] : [])
+                  : aiModels.map(m => ({ value: m.name, label: m.name }))} />
               <button className="apple-btn-primary" onClick={saveAiModel} disabled={aiModelSaving || !aiModel} style={{ flexShrink: 0 }}>
                 {aiModelSaving ? 'Saving…' : 'Save'}
               </button>
@@ -757,23 +759,25 @@ export default function Settings({ active, onCrumb }) {
                     <input className="apple-input" value={m.label || ''} onChange={e => updateMember(m.key, { label: e.target.value })} style={{ width: 140 }} />
                   </Field>
                   <Field label="Payday" hint={null}>
-                    <select className="apple-select" value={pd.dow}
-                      onChange={e => setPayday(p => ({ ...p, [m.key]: { ...pd, dow: e.target.value } }))}>
-                      <option value="0">Monday</option>
-                      <option value="1">Tuesday</option>
-                      <option value="2">Wednesday</option>
-                      <option value="3">Thursday</option>
-                      <option value="4">Friday</option>
-                      <option value="5">Saturday</option>
-                      <option value="6">Sunday</option>
-                    </select>
+                    <Dropdown value={pd.dow}
+                      onChange={v => setPayday(p => ({ ...p, [m.key]: { ...pd, dow: v } }))}
+                      options={[
+                        { value: '0', label: 'Monday' },
+                        { value: '1', label: 'Tuesday' },
+                        { value: '2', label: 'Wednesday' },
+                        { value: '3', label: 'Thursday' },
+                        { value: '4', label: 'Friday' },
+                        { value: '5', label: 'Saturday' },
+                        { value: '6', label: 'Sunday' },
+                      ]} />
                   </Field>
                   <Field label="Frequency" hint={null}>
-                    <select className="apple-select" value={pd.frequency}
-                      onChange={e => setPayday(p => ({ ...p, [m.key]: { ...pd, frequency: e.target.value } }))}>
-                      <option value="weekly">Weekly</option>
-                      <option value="biweekly">Every 2 weeks</option>
-                    </select>
+                    <Dropdown value={pd.frequency}
+                      onChange={v => setPayday(p => ({ ...p, [m.key]: { ...pd, frequency: v } }))}
+                      options={[
+                        { value: 'weekly', label: 'Weekly' },
+                        { value: 'biweekly', label: 'Every 2 weeks' },
+                      ]} />
                   </Field>
                   {household.length > 1 && (
                     <button className="apple-btn-secondary" onClick={() => removeMember(m.key)}

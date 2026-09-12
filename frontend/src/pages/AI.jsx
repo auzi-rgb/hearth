@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import Portal from '../components/Portal'
+import Dropdown from '../components/Dropdown'
 
 const API = '/hearth/api'
 const GATEWAY = 'https://home-app-server.local/gateway/api'
@@ -380,9 +381,8 @@ function MemoryPanel() {
               <div style={{ padding: '8px 0' }}>
                 <input className="apple-input" value={editingFact.fact} onChange={e => setEditingFact(p => ({ ...p, fact: e.target.value }))} style={{ marginBottom: 6 }} />
                 <div style={{ display: 'flex', gap: 8 }}>
-                  <select className="apple-select" value={editingFact.category} onChange={e => setEditingFact(p => ({ ...p, category: e.target.value }))} style={{ fontSize: 12 }}>
-                    {['general','goal','preference','person','account'].map(c => <option key={c} value={c}>{c}</option>)}
-                  </select>
+                  <Dropdown value={editingFact.category} onChange={v => setEditingFact(p => ({ ...p, category: v }))} style={{ fontSize: 12 }}
+                    options={['general','goal','preference','person','account'].map(c => ({ value: c, label: c }))} />
                   <button className="apple-btn-primary" onClick={() => saveEditedFact(f.id, editingFact.fact, editingFact.category)} style={{ fontSize: 12 }}>Save</button>
                   <button className="apple-btn-secondary" onClick={() => setEditingFact(null)} style={{ fontSize: 12 }}>Cancel</button>
                 </div>
@@ -896,12 +896,12 @@ Transactions: ${JSON.stringify(context.recent_transactions || [], null, 2)}`
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
             <div>
               <div className="apple-label" style={{ marginBottom: 6 }}>Model</div>
-              <select className="apple-select" value={model}
-                onChange={e => { setModel(e.target.value); saveSetting('ai_default_model', e.target.value) }}
-                style={{ width: '100%' }}>
-                {models.length === 0 && <option value={model}>{model}</option>}
-                {models.map(m => <option key={m.name} value={m.name}>{m.name}</option>)}
-              </select>
+              <Dropdown value={model}
+                onChange={v => { setModel(v); saveSetting('ai_default_model', v) }}
+                style={{ width: '100%' }}
+                options={models.length === 0
+                  ? [{ value: model, label: model }]
+                  : models.map(m => ({ value: m.name, label: m.name }))} />
             </div>
             <div>
               <div className="apple-label" style={{ marginBottom: 6 }}>Temperature: {temperature}</div>

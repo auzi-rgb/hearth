@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import Dropdown from '../components/Dropdown'
 import {
   AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip as ChartTooltip, ResponsiveContainer, ReferenceLine, ReferenceDot,
@@ -311,10 +312,9 @@ function CreditCardDebtEditor({ card, onSave, strategies, view }) {
               onChange={e => setDayOfMonth(e.target.value)}
               title="Day of month" style={{ fontSize: 13, width: 60, flex: 'none' }} />
           ) : (
-            <select className="apple-select" value={dayOfWeek} onChange={e => setDayOfWeek(parseInt(e.target.value))}
-              style={{ fontSize: 13, flex: 'none' }}>
-              {WEEKDAYS.map((w, i) => <option key={i} value={i}>{w}</option>)}
-            </select>
+            <Dropdown value={dayOfWeek} onChange={v => setDayOfWeek(parseInt(v))}
+              style={{ fontSize: 13, flex: 'none' }}
+              options={WEEKDAYS.map((w, i) => ({ value: i, label: w }))} />
           )}
           <button className="apple-btn-secondary" onClick={setBill}
             disabled={settingBill || !pmtAmount} style={{ fontSize: 12 }}>
@@ -922,9 +922,8 @@ function AddLoanModal({ anchor, onClose, onSave }) {
             <div key={k} style={{ gridColumn: k === 'name' ? 'span 2' : undefined }}>
               <div className="apple-label" style={{ marginBottom: 4 }}>{label}</div>
               {type.startsWith('select:') ? (
-                <select className="apple-select" value={form[k]} onChange={e => f(k, e.target.value)} style={{ width: '100%' }}>
-                  {type.slice(7).split(',').map(o => <option key={o} value={o}>{o}</option>)}
-                </select>
+                <Dropdown value={form[k]} onChange={v => f(k, v)} style={{ width: '100%' }}
+                  options={type.slice(7).split(',').map(o => ({ value: o, label: o }))} />
               ) : (
                 <input className="apple-input" type={type} value={form[k]} onChange={e => f(k, e.target.value)} />
               )}

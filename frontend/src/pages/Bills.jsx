@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import Portal from '../components/Portal'
+import Dropdown from '../components/Dropdown'
 
 const API = '/hearth/api'
 
@@ -208,13 +209,14 @@ function BillModal({ bill, loans, debtAccounts, allBills, onClose, onSaved }) {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <div>
               <div className="apple-label" style={{ marginBottom: 5 }}>Type</div>
-              <select className="apple-select" value={form.payment_type}
-                onChange={e => setField('payment_type', e.target.value)} style={{ width: '100%' }}>
-                <option value="Recurring">Recurring</option>
-                <option value="Loan">Loan</option>
-                <option value="Debt">Debt</option>
-                <option value="Contribution">Contribution</option>
-              </select>
+              <Dropdown value={form.payment_type}
+                onChange={v => setField('payment_type', v)} style={{ width: '100%' }}
+                options={[
+                  { value: 'Recurring', label: 'Recurring' },
+                  { value: 'Loan', label: 'Loan' },
+                  { value: 'Debt', label: 'Debt' },
+                  { value: 'Contribution', label: 'Contribution' },
+                ]} />
             </div>
             <div>
               <div className="apple-label" style={{ marginBottom: 5 }}>Amount ($)</div>
@@ -239,46 +241,43 @@ function BillModal({ bill, loans, debtAccounts, allBills, onClose, onSaved }) {
             </div>
             <div>
               <div className="apple-label" style={{ marginBottom: 5 }}>Confidence</div>
-              <select className="apple-select" value={form.confidence}
-                onChange={e => setField('confidence', e.target.value)}
+              <Dropdown value={form.confidence}
+                onChange={v => setField('confidence', v)}
                 disabled={forceFixed}
-                style={{ width: '100%', opacity: forceFixed ? 0.45 : 1, cursor: forceFixed ? 'not-allowed' : 'pointer' }}>
-                <option value="fixed">Fixed</option>
-                <option value="estimated">Variable</option>
-              </select>
+                style={{ width: '100%', opacity: forceFixed ? 0.45 : 1, cursor: forceFixed ? 'not-allowed' : 'pointer' }}
+                options={[
+                  { value: 'fixed', label: 'Fixed' },
+                  { value: 'estimated', label: 'Variable' },
+                ]} />
             </div>
           </div>
 
           {(form.payment_type === 'Loan' || form.payment_type === 'Debt') && (
             <div>
               <div className="apple-label" style={{ marginBottom: 5 }}>Linked Account</div>
-              <select className="apple-select"
+              <Dropdown
                 value={linkValue}
-                onChange={e => setLink(e.target.value)}
-                style={{ width: '100%' }}>
-                <option value="">— not linked —</option>
-                {debtAccounts?.filter(a => a.type === 'credit').length > 0 && (
-                  <optgroup label="Credit cards">
-                    {debtAccounts.filter(a => a.type === 'credit').map(a => (
-                      <option key={`account:${a.id}`} value={`account:${a.id}`}>{a.display_name || a.name}</option>
-                    ))}
-                  </optgroup>
-                )}
-                {debtAccounts?.filter(a => a.type !== 'credit').length > 0 && (
-                  <optgroup label="Synced loan accounts">
-                    {debtAccounts.filter(a => a.type !== 'credit').map(a => (
-                      <option key={`account:${a.id}`} value={`account:${a.id}`}>{a.display_name || a.name}</option>
-                    ))}
-                  </optgroup>
-                )}
-                {loans?.length > 0 && (
-                  <optgroup label="Hand-tracked loans">
-                    {loans.map(l => (
-                      <option key={`loan:${l.id}`} value={`loan:${l.id}`}>{l.name}</option>
-                    ))}
-                  </optgroup>
-                )}
-              </select>
+                onChange={setLink}
+                style={{ width: '100%' }}
+                options={[
+                  { value: '', label: '— not linked —' },
+                  ...(debtAccounts?.filter(a => a.type === 'credit').length > 0 ? [{
+                    group: 'Credit cards',
+                    options: debtAccounts.filter(a => a.type === 'credit').map(a => ({
+                      value: `account:${a.id}`, label: a.display_name || a.name,
+                    })),
+                  }] : []),
+                  ...(debtAccounts?.filter(a => a.type !== 'credit').length > 0 ? [{
+                    group: 'Synced loan accounts',
+                    options: debtAccounts.filter(a => a.type !== 'credit').map(a => ({
+                      value: `account:${a.id}`, label: a.display_name || a.name,
+                    })),
+                  }] : []),
+                  ...(loans?.length > 0 ? [{
+                    group: 'Hand-tracked loans',
+                    options: loans.map(l => ({ value: `loan:${l.id}`, label: l.name })),
+                  }] : []),
+                ]} />
               <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 4 }}>
                 Links this payment to the credit card or loan it's actually paying off — either synced via SimpleFin or hand-entered in the Debt tab
               </div>
@@ -629,12 +628,11 @@ export default function Bills({ active }) {
                 <div style={{ fontSize: 13, fontWeight: 500 }}>{u.description || '—'}</div>
                 <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{u.date} · {money(u.amount)}</div>
               </div>
-              <select disabled={reconBusy === u.id} defaultValue=""
-                onChange={e => { if (e.target.value) linkUntied(u.id, Number(e.target.value)) }}
-                className="apple-select" style={{ fontSize: 12, maxWidth: 190 }}>
-                <option value="">Link to bill…</option>
-                {sorted.map(b => <option key={b.id} value={b.id}>{b.display_name || b.name}</option>)}
-              </select>
+              <Dropdown disabled={reconBusy === u.id} value=""
+                onChange={v => { if (v) linkUntied(u.id, Number(v)) }}
+                style={{ fontSize: 12, maxWidth: 190 }}
+                placeholder="Link to bill…"
+                options={sorted.map(b => ({ value: String(b.id), label: b.display_name || b.name }))} />
               <button disabled={reconBusy === u.id} onClick={() => linkUntied(u.id, null)}
                 className="apple-btn-secondary" style={{ fontSize: 12 }}>+ New bill</button>
               <button disabled={reconBusy === u.id} onClick={() => markUntiedTransfer(u.id)}

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { getMonthlyIncome } from '../lib/dashboardFields'
+import Dropdown from '../components/Dropdown'
 
 const API = '/hearth/api'
 
@@ -728,10 +729,11 @@ export default function Dashboard({ active, navigateTo }) {
         {editingSched && (
           <div style={{ padding: '10px 12px', background: 'var(--bg-subtle)', borderRadius: 8, marginBottom: 12,
             display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <select className="apple-select" value={schedMode} onChange={e => setSchedMode(e.target.value)} style={{ fontSize: 12 }}>
-              <option value="days">Days of month</option>
-              <option value="payday">On paydays</option>
-            </select>
+            <Dropdown value={schedMode} onChange={setSchedMode} style={{ fontSize: 12 }}
+              options={[
+                { value: 'days', label: 'Days of month' },
+                { value: 'payday', label: 'On paydays' },
+              ]} />
             {schedMode === 'days' && (
               <input className="apple-input" value={schedDays} onChange={e => setSchedDays(e.target.value)}
                 placeholder="1, 15" style={{ width: 90, fontSize: 12, padding: '4px 8px' }} />
