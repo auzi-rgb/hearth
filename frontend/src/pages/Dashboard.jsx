@@ -308,6 +308,15 @@ export default function Dashboard({ active, navigateTo }) {
   // the three numbers always reconcile.
   const billsNeeded     = data.bills_needed ?? 0
   const billsShortfall  = data.bills_shortfall ?? 0
+  // The plain answer to "how short am I?": the projection's lowest point decides it.
+  // "Needed for bills" can't say this — once the balance is already short it clamps at
+  // "everything you have" (Free to move can't go negative), so the actual gap was
+  // reduced to a small subtitle measured against the buffer rather than against $0.
+  // Overdrawn = the projection really goes below $0, not just under the buffer.
+  const lowPoint        = data.bills_low_point
+  const overdrawn       = lowPoint != null && lowPoint < 0
+  const shortToZero     = overdrawn ? Math.abs(lowPoint) : 0
+  const needToAvoidOverdraft = billsBal + shortToZero
   const billsPending    = data.bills_pending ?? 0
   const billsPosted     = data.bills_balance_posted ?? billsBal
   const lowDate         = data.bills_low_date
@@ -422,6 +431,13 @@ export default function Dashboard({ active, navigateTo }) {
               Overdraft Warning — Bills may not cover upcoming payments
             </span>
           </div>
+          {lowPoint != null && (
+            <div style={{ fontSize: 13, marginBottom: 8, color: 'var(--text-primary)', lineHeight: 1.5 }}>
+              {overdrawn
+                ? <>You have <b>{money(billsBal)}</b> in Bills and need <b>{money(needToAvoidOverdraft)}</b> to stay out of overdraft{lowDate ? <> through {lowDate}</> : null} — <b style={{ color: 'var(--red)' }}>short {money(shortToZero)}</b>.</>
+                : <>Bills stays above $0 but dips to <b>{money(lowPoint)}</b>{lowDate ? <> on {lowDate}</> : null}, under your {money(safeBuffer)} buffer.</>}
+            </div>
+          )}
           {data.overdraft_warnings.map((w, i) => {
             const d = new Date(w.due_date + 'T12:00:00')
             const dateStr = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
@@ -625,6 +641,43 @@ export default function Dashboard({ active, navigateTo }) {
         {/* The split the household actually needs: of what's in Bills, how much
             must stay for bills and how much is genuinely free. Adds back to the
             balance above by construction, so it can be checked at a glance. */}
+        {billsShortfall > 0 && (
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <div style={{ flex: 1, padding: '10px 12px', background: 'var(--bg-subtle)', borderRadius: 10 }}>
+                <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.6,
+                  color: 'var(--text-tertiary)' }}>In Bills</div>
+                <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.03em', fontVariantNumeric: 'tabular-nums',
+                  color: 'var(--text-primary)' }}>{money(billsBal)}</div>
+                <div style={{ fontSize: 10.5, color: 'var(--text-tertiary)', marginTop: 1 }}>right now</div>
+              </div>
+              <div style={{ flex: 1, padding: '10px 12px', background: 'var(--bg-subtle)', borderRadius: 10 }}>
+                <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.6,
+                  color: 'var(--text-tertiary)' }}>{overdrawn ? 'Needed to avoid overdraft' : 'Needed to keep buffer'}</div>
+                <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.03em', fontVariantNumeric: 'tabular-nums',
+                  color: 'var(--text-primary)' }}>{money(overdrawn ? needToAvoidOverdraft : billsBal + billsShortfall)}</div>
+                <div style={{ fontSize: 10.5, color: 'var(--text-tertiary)', marginTop: 1 }}>
+                  {lowDate ? `to get through ${lowDate}` : 'on the projection'}
+                </div>
+              </div>
+              <div style={{ flex: 1, padding: '10px 12px', borderRadius: 10,
+                background: overdrawn ? 'rgba(255,59,48,0.08)' : 'rgba(255,149,0,0.08)' }}>
+                <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.6,
+                  color: overdrawn ? 'var(--red)' : 'var(--orange)' }}>Short</div>
+                <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.03em', fontVariantNumeric: 'tabular-nums',
+                  color: overdrawn ? 'var(--red)' : 'var(--orange)' }}>{money(overdrawn ? shortToZero : billsShortfall)}</div>
+                <div style={{ fontSize: 10.5, color: 'var(--text-tertiary)', marginTop: 1 }}>
+                  {overdrawn ? `${money(billsShortfall)} with the ${money(safeBuffer)} buffer` : 'stays above $0'}
+                </div>
+              </div>
+            </div>
+            <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginTop: 8, lineHeight: 1.5 }}>
+              Lowest projected balance {money(lowPoint)}{lowDate ? ` on ${lowDate}` : ''}
+              {cleanDriver ? `, right after ${cleanDriver}` : ''}. Nothing is free to move until that's covered.
+            </div>
+          </div>
+        )}
+        {billsShortfall <= 0 && (
         <div style={{ display: 'flex', gap: 10, marginBottom: 20 }}>
           <div style={{ flex: 1, padding: '10px 12px', background: 'var(--bg-subtle)', borderRadius: 10 }}>
             <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.6,
@@ -648,10 +701,11 @@ export default function Dashboard({ active, navigateTo }) {
             <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.03em', fontVariantNumeric: 'tabular-nums',
               color: suggestedXfer > 0 ? 'var(--accent-text)' : 'var(--text-tertiary)' }}>{money(suggestedXfer)}</div>
             <div style={{ fontSize: 10.5, color: 'var(--text-tertiary)', marginTop: 1 }}>
-              {billsShortfall > 0 ? `short ${money(billsShortfall)}` : 'to Food'}
+              to Food
             </div>
           </div>
         </div>
+        )}
 
         <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0',
           borderTop: '1px solid var(--border)', fontSize: 14 }}>
